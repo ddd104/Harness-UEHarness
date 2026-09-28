@@ -1,0 +1,29 @@
+# Unreal Engine generated files
+Binaries/
+Intermediate/
+Saved/
+DerivedDataCache/
+
+# Local IDE state and generated project files
+.vs/
+.idea/
+*.sln
+*.slnx
+*.sln.docstates
+*.sln.DotSettings.user
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.suo
+*.userosscache
+*.sln.ide
+*.VC.db
+*.VC.opendb
+*.opensdf
+*.sdf
+*.ipch
+
+# Operating system metadata
+.DS_Store
+Thumbs.db
+Desktop.ini

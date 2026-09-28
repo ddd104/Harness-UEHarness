@@ -1,0 +1,16 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "BSHarness",
+	"Description": "BSHarness editor plugin.",
+	"Category": "Editor",
+	"CanContainContent": false,
+	"Modules": [
+		{
+			"Name": "BSHarness",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
+		}
+	]
+}
