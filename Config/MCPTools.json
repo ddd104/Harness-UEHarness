@@ -1,0 +1,73 @@
+{
+  "version": 1,
+  "tools": [
+    {
+      "name": "bsharness.editor_info",
+      "handler": "editor_info",
+      "description": "查询当前 Unreal Engine 版本。"
+    },
+    {
+      "name": "bsharness.project_info",
+      "handler": "project_info",
+      "description": "查询当前项目名称、工程文件以及项目和插件的源码目录。"
+    },
+    {
+      "name": "bsharness.assets.search",
+      "handler": "assets.search",
+      "description": "按目录、类型或名称搜索资产元数据，不加载资产。isScanning 为 true 时结果可能不完整。",
+      "parameters": {
+        "path": { "description": "资产目录，如 /Game。", "default": "/Game" },
+        "name_contains": { "description": "资产名包含的文字，不区分大小写。" },
+        "class_path": { "description": "精确类型路径，例如 /Script/Engine.Material；省略表示所有类型。" },
+        "recursive": { "default": true },
+        "limit": { "default": 100 }
+      }
+    },
+    {
+      "name": "bsharness.assets.get",
+      "handler": "assets.get",
+      "description": "查询资产元数据和包依赖，不加载资产对象。",
+      "parameters": {
+        "object_path": { "description": "资产搜索结果中的完整 objectPath，例如 /Game/Folder/Asset.Asset。" }
+      }
+    },
+    {
+      "name": "bsharness.assets.open",
+      "handler": "assets.open",
+      "description": "在 UE 中打开资产编辑器；已经打开时切换到该编辑器。打开关卡会切换场景，并可能提示保存。",
+      "parameters": {
+        "object_path": { "description": "完整资产路径、包路径或内容浏览器的复制引用文本。" }
+      }
+    },
+    {
+      "name": "bsharness.actors.list",
+      "handler": "actors.list",
+      "description": "查询编辑器场景中已加载 Actor 的标签、类型、位置和选中状态。不查询 PIE 或未加载的 World Partition Actor。",
+      "parameters": {
+        "selected_only": { "default": false },
+        "limit": { "default": 100 }
+      }
+    },
+    {
+      "name": "bsharness.source.list",
+      "handler": "source.list",
+      "description": "在后台列出项目或插件 Source 目录中的源码文本文件。",
+      "parameters": {
+        "root": { "description": "plugin 为插件源码，project 为工程源码。", "default": "plugin" },
+        "path": { "description": "相对 Source 的子目录，省略表示整个 Source。", "default": "" },
+        "recursive": { "default": true }
+      }
+    },
+    {
+      "name": "bsharness.source.read",
+      "handler": "source.read",
+      "description": "在后台按行读取源码文本，保留空行，单文件最大 1 MiB。",
+      "parameters": {
+        "root": { "default": "plugin" },
+        "path": { "description": "相对 Source 的文件路径，例如 BSHarnessTools/BSHarnessTools.Build.cs。" },
+        "start_line": { "default": 1 },
+        "max_lines": { "default": 200 }
+      }
+    }
+  ]
+}

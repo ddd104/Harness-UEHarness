@@ -8,6 +8,11 @@
 	"CanContainContent": false,
 	"Modules": [
 		{
+			"Name": "BSHarnessTools",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
+		},
+		{
 			"Name": "BSHarness",
 			"Type": "Editor",
 			"LoadingPhase": "Default"
