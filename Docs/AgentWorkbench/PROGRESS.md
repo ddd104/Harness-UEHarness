@@ -1,0 +1,116 @@
+# Agent Workbench 实施进度
+
+更新：2026-09-28。本次将对话发送从临时 Mock 流程改为真实模型请求，并修正连接状态显示；以同步更新的 `SPEC.md` 为功能和 UI 验收依据。
+
+## 环境发现（P0）
+
+| 项目 | 实际结果 |
+|---|---|
+| 工程 | `F:\UE5Project\UEHarness\UEHarness.uproject`；`EngineAssociation=UEAS58` |
+| UE 版本 | 本地 `Build.version` 为 5.8.0 |
+| 引擎根目录 | `F:\EPIC\Engine58WithPDB\Engine\Windows\Engine`；注册表 UEAS58 指向其上一层 `...\Windows` |
+| Editor Target | `Source/UEHarnessEditor.Target.cs`；`TargetType.Editor`、BuildSettings V7、IncludeOrder Unreal5_8 |
+| 平台与工具链 | Win64；Visual Studio 14.50、Windows SDK 10.0.22621.0；引擎 `Build.bat` 和 `UnrealEditor-Cmd.exe` 可用 |
+| 现有插件 | `BSHarness` 与 `BSHarnessTools` 为 Editor 模块；项目还启用 ModelingToolsEditorMode、StateTree、GameplayStateTree、ModelContextProtocol |
+| 现有模型客户端 | 在工程与 BSHarness 源码中未发现可复用的模型客户端 |
+| 现有工具系统 | `BSHarnessTools` 有 MCP 工具注册、配置、分派及自动化测试；P1 未接入 |
+| 初始工作区状态 | BSHarness Git 仓库已有未跟踪的 `Docs/AgentWorkbench/` 和 `README-AgentWorkbench-Codex.md`；均保留。工程根目录不是 Git 仓库，新增兄弟插件与 `.uproject` 不会出现在 BSHarness 的 `git status` 中 |
+| 阻塞 | 构建和命令行自动化无阻塞；未执行图形编辑器内手工验收 |
+
+已核查本地 UE5.8 头文件/示例：`ToolMenus.h` 与 LevelEditor/Blutility 工具栏示例、`SWindow.h` 与窗口创建/关闭示例、`DeveloperSettings.h`、`IContentBrowserSingleton.h`、`AssetData.h`、`HttpModule.h`、`IHttpRequest.h`。P1 仅使用 ToolMenus、Slate、DeveloperSettings；资产与 HTTP 接口留待后续阶段。首次构建发现 `UToolMenus::IsAvailable()` 在本地版本不存在，已改用本地可用的 `UnregisterOwner`。
+
+## 阶段状态
+
+| 阶段 | 代码/文档实施 | 编译 | 自动化 | 编辑器内验收 |
+|---|---|---|---|---|
+| P0 工程勘察 | 已完成 | 不适用 | 不适用 | 不适用 |
+| P1 插件/窗口/布局/设置 | 已完成代码；已修复工具栏注册路径；新窗口首次发送前不进入历史 | UEHarnessEditor Win64 Development 通过 | 4/4 通过 | 原始工具栏未显示；修复后待图形编辑器复验 |
+| P2 候选资产/请求快照 | 已完成代码；现支持 /Game/ 蓝图及非蓝图资产，候选行仅 Object Path + X | UEHarnessEditor Win64 Development 通过 | P2 6/6、P1 回归 4/4 通过 | 未验证 |
+| P3 执行器/隔离 | 已实现单 Session 异步 HTTP 请求、取消、请求超时和回调归属校验；全局并发限额、排队与工具循环未实现 | UEHarnessEditor Win64 Development 通过 | 实际请求集成 1/1 通过 | 未验证 |
+| P4 历史持久化 | 完成候选、消息、模型、草稿及 Run 快照的保存/恢复和分叉；本次加入首次发送才显示/保存历史 | UEHarnessEditor Win64 Development 通过 | History 4/4 通过 | 未验证 |
+| P5 真实 API/蓝图只读工具 | 已实现 DeepSeek/OpenAI/OpenRouter/Ollama Chat Completions、Anthropic Messages、Gemini generateContent 的非流式纯文本请求；蓝图读取与模型工具调用未实现 | UEHarnessEditor Win64 Development 通过 | DeepSeek 实际请求 1/1 通过；其他 Provider 未验证 | 未验证 |
+| P6 终验/交付 | 未开始 | 未验证 | 未验证 | 未验证 |
+
+## 早期阶段文件计划与实施记录（以下 Mock 描述为历史状态）
+
+- 当前工作树将 `AgentWorkbenchEditor` 作为 `BSHarness.uplugin` 内的 Editor 模块，源码位于 `Plugins/BSHarness/Source/AgentWorkbenchEditor/`。此前独立的 `Plugins/AgentWorkbench/` 路径已不存在；这与 `SPEC.md` 中独立插件路径不同，属于待确认的结构差异，本次工具栏修复未改动该布局。
+- `AgentWorkbenchEditorModule.cpp`：Level Editor 工具栏入口与菜单生命周期。
+- `AgentWorkbenchSession.h/.cpp`：每个新窗口独立 SessionId、消息、草稿、模型选项、候选容器、Runner 占位状态；历史会话窗口复用；Mock 同步响应和结构化事件。
+- `AgentWorkbenchWidgets.h/.cpp`：独立非模态 SWindow；左历史，中间模型→消息列表→独立候选资产空态→固定输入区，右执行事件列表，底部状态栏。
+- `AgentWorkbenchSettings.h/.cpp`：Project Settings 插件设置；仅保存凭据环境变量名称、Mock、模型列表、三个超时及执行限制。
+- `AgentWorkbenchTests.cpp`：Session 隔离、设置默认值、三窗口和历史激活自动化测试。
+- 当前 `.uproject` 启用 BSHarness 且仅允许 Editor Target；`BSHarness.uplugin` 注册 `AgentWorkbenchEditor` 模块。
+- `BSHarness/AGENTS.md`：保留原文并添加 AgentWorkbench 专项约定；本进度文件记录实际结果。
+
+## P2 实施范围
+
+- `AgentAssetContextService.h/.cpp`：只在目标窗口点击按钮时读取主 Content Browser 选中资产（本地 UE5.8 `GetSelectedAssets` 实现确认使用 `PrimaryContentBrowser`）；支持 /Game/ 下有效资产路径和类元数据，跳过无效路径、重定向器和无法确认类型，不调用 `GetAsset`/`TryLoad`。追加、规范化对象路径去重、上限与原因计数均按 Session 处理。
+- 候选 Widget：保留原三栏及中栏顺序；添加、每行完整 Object Path 与 X 移除、清空、折叠/展开、空态与反馈均可操作，展开高度 200 Slate 单位、列表内部滚动，折叠高度 46；输入框和发送按钮固定在其下方。X 与清空仅改变引用数组。
+- Session 与发送：候选 DTO 保存路径、包名、资产类、状态与加入时间。发送前验证当前候选，注册表扫描和已知失效项阻止发送并保留草稿。模型、输入和当前候选复制到本 Run 的快照；Mock 执行区用 JSON 库显示该快照的结构化请求预览，历史用户消息保留当轮候选值副本。
+- 只读工具：`list_context_assets` 只返回快照；`get_asset_metadata` 只接受本 Run 已授权的完整对象路径，返回 Asset Registry 中的真实元数据、读取时间及可识别的内存包脏状态。未知工具、额外参数、越界路径和失效资产返回结构化错误；不读取蓝图图表或修改资产。
+- `AgentAssetContextTests.cpp`：覆盖蓝图/纹理添加、重定向器过滤、追加去重、旧勾选字段兼容、空选择及结果计数、上限、无效路径、跨 Session 隔离、快照值语义、扫描/失效阻断、工具授权，以及当前工程真实蓝图和非蓝图资产的 Asset Registry 集成查询。
+
+## 本次候选历史补全
+
+- `AgentWorkbenchHistory.h/.cpp`：每个 Session 独立 JSON DTO，写入项目 `Saved/AgentWorkbench/Sessions`，先写临时文件再替换；保存候选 ID、路径、名称、类、勾选和状态，以及消息、草稿、模型、事件和逐 Run 输入值快照。不持久化 `FAssetData`、UObject、运行对象或凭据。逐文件恢复，损坏文件单独报告；没有中心索引依赖。
+- `AgentWorkbenchSession.h/.cpp`：启动加载历史；Session 编辑、关闭和退出保存；分叉以深拷贝得到新 SessionId，保留旧 Run 来源信息，不复制活动 Runner。恢复未完成的 Run 为 `Interrupted`，不重放请求。恢复候选时只查 Asset Registry 元数据，扫描中保持 `Unknown`，已知无效保留路径并标为 `Missing`。
+- `AgentWorkbenchWidgets.h/.cpp`：历史行右键可删除或新建分叉；候选区折叠/展开；候选移除、清空、模型和草稿变动保存到所属 Session。折叠状态仅是窗口 UI 状态，不随 Session 持久化。
+- `AgentWorkbenchHistoryTests.cpp`：覆盖历史往返、失效路径保留、勾选/模型/草稿/Run 快照恢复、坏文件隔离、未完成 Run 中断、分叉候选独立和分叉 Run 历史重载。P2 测试继续覆盖多选过滤、重复、A/B 隔离、快照、路径进入 Mock 模型输入。
+
+## 执行记录
+
+1. 勘察命令：`git status --short`、`rg --files`、读取 `.uproject`/Target/插件代码、读取本地引擎 `Build.version` 和头文件。结果见上表。
+2. 构建命令：`& 'F:\EPIC\Engine58WithPDB\Engine\Windows\Engine\Build\BatchFiles\Build.bat' UEHarnessEditor Win64 Development '-Project=F:\UE5Project\UEHarness\UEHarness.uproject' -WaitMutex -NoHotReload`。初次因本地 `UToolMenus::IsAvailable` 不存在失败；修正后最终退出码 0，`Result: Succeeded`。日志：`C:\Users\NiubilityPC\AppData\Local\UnrealBuildTool\Log.txt`。
+3. 测试命令：`& 'F:\EPIC\Engine58WithPDB\Engine\Windows\Engine\Binaries\Win64\UnrealEditor-Cmd.exe' 'F:\UE5Project\UEHarness\UEHarness.uproject' '-ExecCmds=Automation RunTests AgentWorkbench.P1' '-TestExit=Automation Test Queue Empty' '-ReportExportPath=F:\UE5Project\UEHarness\Saved\Automation\AgentWorkbenchP1' '-abslog=F:\UE5Project\UEHarness\Saved\Logs\AgentWorkbenchP1Tests.log' -unattended -nullrhi -nosound -nop4 -nosplash`。最终退出码 0；SessionIsolation、SettingsDefaults、MultiWindow 共 3/3 成功。报告：`F:\UE5Project\UEHarness\Saved\Automation\AgentWorkbenchP1\index.json`。
+4. 变更检查：检查 BSHarness 仓库状态及工程级新增文件；新增插件和 `.uproject` 位于该 Git 仓库外。未修改引擎源码、无关模块或手工改写生成目录。
+5. 2026-09-28 工具栏修复：编辑器日志确认 `AgentWorkbenchEditor` 已从 `Plugins/BSHarness/Binaries/Win64` 加载。UE5.8 的 `LevelEditorToolBar.cpp` 只生成 `LevelEditor.LevelEditorToolBar.User` 等子菜单，不生成此前扩展的父菜单。已将入口改到 `.User`，并使用引擎示例中的 `CalloutToolbar` 样式。重新执行上述 Editor Target 构建，退出码 0。重新执行 `AgentWorkbench.P1` 自动化（报告目录 `Saved/Automation/AgentWorkbenchToolbarFix`），退出码 0、4/4 通过；新增 `ToolbarRegistration` 断言目标子工具栏和按钮条目均已注册。
+6. 2026-09-28 P2：重新读取当前规则、SPEC、TASKS、PROGRESS、现有源码与 Git 差异。核查本地 `ContentBrowserSingleton.cpp`、`IContentBrowserSingleton.h`、`AssetData.h`、`IAssetRegistry.h`、`SoftObjectPath.h`、`PackageName.h`、`UObjectGlobals.h` 的实际 API。构建命令同第 2 项；最终退出码 0。首次 P2 自动化为 4/5，其中无点号路径被 UE 基础校验接受；已补充完整 `Package.Asset` 检查并重测。
+7. P2 最终自动化命令：`& 'F:\EPIC\Engine58WithPDB\Engine\Windows\Engine\Binaries\Win64\UnrealEditor-Cmd.exe' 'F:\UE5Project\UEHarness\UEHarness.uproject' '-ExecCmds=Automation RunTests AgentWorkbench' '-TestExit=Automation Test Queue Empty' '-ReportExportPath=F:\UE5Project\UEHarness\Saved\Automation\AgentWorkbenchP2Final' '-abslog=F:\UE5Project\UEHarness\Saved\Logs\AgentWorkbenchP2Final.log' -unattended -nullrhi -nosound -nop4 -nosplash`。退出码 0，报告 `Saved/Automation/AgentWorkbenchP2Final/index.json` 显示 10/10 成功（P1 4 项、P2 6 项）。真实项目蓝图的注册表读取与元数据查询通过；测试没有驱动图形 Content Browser 的人工选择。
+8. 本次重新读取规则、SPEC、TASKS、ACCEPTANCE、PROGRESS，检查 `git status --short`、已暂存/未暂存差异和源码；保留原有改动。核查本地 UE5.8 `ContentBrowserSingleton.cpp`：`GetSelectedAssets` 从 `PrimaryContentBrowser` 取选择；核查 `SBox.h` 的动态高度属性、`FileManager.h` 的替换/文件遍历接口、`JsonObject.h` 的安全读取接口和 Asset Registry 扫描状态接口。实际多浏览器图形行为未测试。
+9. 本次构建：第 2 项命令，最终退出码 0、`Result: Succeeded`。自动化：第 7 项命令，最终报告路径改为 `Saved/Automation/AgentWorkbenchCandidatesHistoryVerified`，日志改为 `Saved/Logs/AgentWorkbenchCandidatesHistoryVerified.log`；退出码 0，报告 `succeeded=12, failed=0, notRun=0`。其中 P1 4、P2 6、History 2。执行 `git diff --check` 与 `git diff --cached --check` 无空白错误（只有工作区行尾转换提示）。
+
+## 本次历史栏交互调整
+
+- 删除窗口内“新建对话”和历史行内“分叉”按钮；工具栏新建入口保留。左键点击历史行延迟到下一帧，在当前窗口重新构建全部会话内容，不创建窗口。目标已经在另一窗口时交换两个窗口显示的 Session，以维持单 Session 单可写窗口。
+- 右键指定历史行使用 UE5.8 `SListView` 选择与 `FMenuBuilder` 垂直菜单，提供“删除”和“新建分叉”。删除前确认；删除只移除历史 JSON、Session 和候选引用，不触碰真实资产。删除当前 Session 时优先在原窗口显示一个尚未打开的历史 Session；没有可用 Session 时关闭该窗口。右键新建分叉在当前窗口切换到新 Session。
+- `AgentWorkbenchTests.cpp` 新增 `History.InPlaceNavigationAndDelete`，验证已打开会话交换窗口、草稿归属不变、分叉不新建窗口，以及删除历史文件后的窗口映射。更新 `AGENTS.md`、规则片段、SPEC、TASKS 和 ACCEPTANCE 中与旧“激活原窗口”交互冲突的文字。
+- 本轮读取规则和当前 Git 状态；核查本地 `SListView.h`、`STableRow.h` 的右键选行/菜单行为及 `SWindow.h` 的 `SetContent` 签名。构建命令同第 2 项，最终退出码 0。自动化命令同第 7 项，最终报告 `Saved/Automation/AgentWorkbenchHistoryNavigationFinal/index.json`，日志 `Saved/Logs/AgentWorkbenchHistoryNavigationFinal.log`；退出码 0，13/13 通过（P1 4、P2 6、History 3）。
+
+## 本次历史重命名与快捷键
+
+- 历史右键菜单加入“重命名”；选中历史行按 F2 进入行内编辑，按 Delete 复用已有删除确认。左键切换后重新选中当前行并将焦点给历史列表，保证 F2 可继续作用于当前对话。编辑框内的 Delete 由文本框处理，不触发会话删除。
+- 重命名只修改 Session 标题，拒绝空白、换行和超过 128 字符的标题；同步保存历史 JSON、刷新所有历史栏和已打开窗口标题，不改变 SessionId、消息或候选资产。单独保存“手工命名”标记，避免用户把标题改为“新对话”后被下一次发送自动覆盖。
+- 核查本地 UE5.8 `SListView.h` 的 `OnKeyDownHandler`、`SInlineEditableTextBlock.h/.cpp` 的行内编辑、文本提交与 F2 行为。构建命令同第 2 项，退出码 0、`Result: Succeeded`。自动化命令同第 7 项，最终报告 `Saved/Automation/AgentWorkbenchHistoryRenameFinal/index.json`、日志 `Saved/Logs/AgentWorkbenchHistoryRenameFinal.log`，退出码 0、13/13 通过。新增断言覆盖空标题拒绝、标题裁剪、历史持久化、窗口标题更新和手工命名保护；图形编辑器的实际 F2/Delete/右键操作未验证。
+
+## 本次 Content 资产添加修复与候选行简化
+
+- 用户反馈主内容浏览器选中的资产被判为“非蓝图 1”。源码确认 `AddAssets` 先检查 `IsInstanceOf<UBlueprint>`，而 `BuildSnapshot` 和 `get_asset_metadata` 也有同样的蓝图限制。按本次需求改为支持有有效 Object Path、位于 /Game/ 且有 AssetClassPath 的 Content 资产；只排除重定向器、无效/越界路径和缺少类元数据的项，不调用 `GetAsset`/`TryLoad`。发送与只读元数据工具同步支持非蓝图资产。
+- 候选行只显示完整 Object Path 和右侧“X”；X 仅移除当前 Session 的候选引用。移除行内复选框、名称、定位和复制路径按钮。所有当前候选用于下一次发送；旧历史中的 `bIncluded` 字段仍可读取，但不再隐藏可见候选。失效/待验证路径在列表上方提示，长路径在行内折行且 Tooltip 保留完整值。
+- `AgentAssetContextTests.cpp` 覆盖蓝图与纹理混选、重定向器过滤、去重、旧禁用标记不隐藏可见候选、移除后真实资产仍在，以及从当前项目 Asset Registry 找到真实非蓝图资产并完成添加→发送快照→只读元数据→Mock 输入路径闭环。
+- 实际构建命令同执行记录第 2 项，退出码 0、`Result: Succeeded`。自动化命令同第 7 项，报告 `Saved/Automation/AgentWorkbenchContentAssets/index.json`、日志 `Saved/Logs/AgentWorkbenchContentAssets.log`，退出码 0、13/13 通过（P1 4、P2 6、History 3）。未在图形编辑器里重新点击添加按钮验证用户所选的具体资产。
+
+## 编辑器内验收与剩余问题
+
+- 本次 Provider 设置：`EAgentWorkbenchProvider` 新增 DeepSeek、OpenAI、Anthropic、Google Gemini、OpenRouter、Ollama，并保留 Mock；代码默认值和项目 `Config/DefaultGame.ini` 中 `ProviderType` 改为 DeepSeek，保留用户现有 `DefaultModel=Mock` 与 `AvailableModels`。当前发送仍明确走 Mock 执行器；真实 Provider 的网络适配、凭据使用和协议验证属于 P5。本地 UE5.8 `UENUM`/`UMETA` 头文件与示例已核查；执行 `Build.bat UEHarnessEditor Win64 Development -Project=F:\UE5Project\UEHarness\UEHarness.uproject -WaitMutex -NoHotReload`，退出码 0、`Result: Succeeded`；执行 `UnrealEditor-Cmd.exe` 的 `Automation RunTests AgentWorkbench`，报告 `Saved/Automation/AgentWorkbenchProviders/index.json`，退出码 0、14/14 通过。`git diff --check` 与 `git diff --cached --check` 无空白错误。图形编辑器中的项目设置下拉显示尚未手工验证。
+
+- 本次历史准入调整：工具栏打开的新 Session 保持临时状态；草稿、模型和候选更改不会写历史。首次有效发送在 RunStarted 后写入历史，历史面板只列有 Run 的 Session。空消息或候选校验失败不会出现历史；关闭或切走未发送的临时 Session 会丢弃它。旧版本已保存的空 Session 文件保持原样，但启动时不显示或加载到当前会话列表。已有历史的分叉继续即时进入历史。
+- 增加 `History.OnFirstSend` 自动化，以及多窗口中关闭未发送窗口的检查；现有历史导航测试改用已发送的历史会话。首次构建的 C++ 编译阶段完成，但插件 DLL 链接被正在 Rider 调试的 `UnrealEditor.exe` 占用，`Build.bat` 退出码 1（LNK1104）。用户关闭编辑器后原命令重跑成功，退出码 0、`Result: Succeeded`。命令行自动化使用 `Automation RunTests AgentWorkbench`，报告 `Saved/Automation/AgentWorkbenchHistoryFirstSend/index.json`、日志 `Saved/Logs/AgentWorkbenchHistoryFirstSend.log`；退出码 0、14/14 通过（P1 4、P2 6、History 4）。`git diff --check` 与 `git diff --cached --check` 通过。图形编辑器内尚未验证本次交互。
+
+- 用户在图形编辑器中发现原工具栏按钮未显示。已定位并修复菜单路径；修复后的实际显示仍待使用新构建重启编辑器复验。三窗口视觉布局、Content Browser 切换、DPI、中文输入法与 Ctrl+Enter 的实际交互也仍须在编辑器中验证。命令行测试不能替代手工 UI 验收。
+- P1 Mock 同步完成，没有真实请求和可持续的运行任务；停止按钮仅在 Runner 处于运行中时启用。异步取消、超时、回调归属属于 P3。
+- 本次历史保存/恢复和分叉已通过命令行自动化；未在图形编辑器中重启、浏览历史或分叉验证。当前历史文件位于项目 Saved 中，没有中心索引；保存失败只写 UE 警告日志，尚无窗口级反馈。
+- 设置中的超时和限额已配置，但 P1 Mock 不执行异步任务；真正的限额执行属于 P3。凭据值未读取或保存。
+- 图形编辑器内验收未执行：本次选中真实资产后点击添加、候选行仅路径与 X、X 移除，之前的 F2/Delete、右键重命名、左键原窗口切换、删除确认/回退和分叉，以及多个 Content Browser 的实际来源、折叠/滚动、历史重启恢复和请求预览观感仍须手工确认。自动化已验证服务逻辑与真实 Asset Registry 查询，但不能据此标记这些 UI 操作为通过。
+- 当前 `AgentWorkbenchEditor` 仍作为 BSHarness 内模块，尚非 SPEC 所述的独立 `Plugins/AgentWorkbench` 插件；P2 保留了现有布局，没有在本阶段搬动模块。
+
+## 下一步
+
+先在图形编辑器内复验真实发送、连接名称、停止和历史切换；后续按 TASKS.md 补齐并发排队、模型工具调用和更深入的蓝图内容读取。
+
+## 2026-09-28 真实模型发送修复
+
+- 对话发送现在调用 `FAgentModelClient`，按当前项目设置选择 Provider，并在 Run 开始时冻结用户输入、模型、已有对话和候选资产路径。请求在 UE HTTP 模块异步执行；响应、失败和取消只更新归属 Run 的 Session。旧 Mock 回复不再进入新请求的对话上下文。
+- 工具栏连接名称从项目设置读取；发送按钮、消息标签、执行详情和状态栏去除了固定 Mock 文案。旧 Session 的模型若仍为 Mock，打开模型栏时改用当前默认模型。下拉框打开时重读项目设置中的模型列表。
+- 项目设置仍仅保存凭据及 Base URL 的环境变量名称；请求时读取环境变量。缺少真实模型或凭据会直接提示错误，不制造回复。执行详情显示真实请求体，历史文件在 `bPersistDetailedPayloads=false` 时不保存详情正文。
+- `UEHarnessEditor Win64 Development` 编译成功。`Automation RunTests AgentWorkbench` 报告 `Saved/Automation/AgentWorkbenchFinal/index.json`，14/14 通过。单独运行 `ManualProvider.LiveRequest`，报告 `Saved/Automation/AgentWorkbenchLiveProviderFinal/index.json`，1/1 通过，已通过 UE HTTP 客户端调用当前配置的 DeepSeek `deepseek-flash` 并取得非空回复。另以相同地址、环境变量和模型完成一次短请求，服务端确认模型名有效。`git diff --check` 无空白错误。
+- 图形编辑器内手工发送、停止、切换项目设置后的即时观感未验证。当前未实现模型工具调用循环、蓝图结构读取、全局并发排队、重试或流式输出；不能把这些能力标为完成。

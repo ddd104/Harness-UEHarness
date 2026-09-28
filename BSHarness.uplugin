@@ -16,6 +16,11 @@
 			"Name": "BSHarness",
 			"Type": "Editor",
 			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "AgentWorkbenchEditor",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
 		}
 	]
 }
