@@ -4,9 +4,11 @@
 #include "AgentWorkbenchSession.h"
 #include "Widgets/SCompoundWidget.h"
 #include "Widgets/Views/SListView.h"
+#include "Widgets/Views/STreeView.h"
 
 class SMultiLineEditableTextBox;
 class SInlineEditableTextBlock;
+struct FAgentExecutionNode;
 template<typename OptionType> class SComboBox;
 
 class SAgentHistoryPanel : public SCompoundWidget
@@ -48,6 +50,7 @@ public:
     SLATE_BEGIN_ARGS(SAgentConversationList) {} SLATE_END_ARGS()
     void Construct(const FArguments& Args, TSharedRef<FAgentSession> InSession);
     void Refresh();
+    void ScrollToLatest();
 private:
     TSharedRef<ITableRow> MakeRow(TSharedPtr<FAgentMessage> Item, const TSharedRef<STableViewBase>& Owner);
     TSharedPtr<FAgentSession> Session;
@@ -79,10 +82,19 @@ public:
     SLATE_BEGIN_ARGS(SAgentExecutionPanel) {} SLATE_END_ARGS()
     void Construct(const FArguments& Args, TSharedRef<FAgentSession> InSession);
     void Refresh();
+    void ScrollToLatest();
 private:
-    TSharedRef<ITableRow> MakeRow(TSharedPtr<FAgentEvent> Item, const TSharedRef<STableViewBase>& Owner);
+    TSharedRef<ITableRow> MakeRow(TSharedPtr<FAgentExecutionNode> Item, const TSharedRef<STableViewBase>& Owner);
+    void GetNodeChildren(TSharedPtr<FAgentExecutionNode> Item, TArray<TSharedPtr<FAgentExecutionNode>>& OutChildren) const;
+    void OnExpansionChanged(TSharedPtr<FAgentExecutionNode> Item, bool bExpanded);
+    FString NodeKey(const FAgentExecutionNode& Node) const;
     TSharedPtr<FAgentSession> Session;
-    TSharedPtr<SListView<TSharedPtr<FAgentEvent>>> List;
+    TSharedPtr<STreeView<TSharedPtr<FAgentExecutionNode>>> Tree;
+    TArray<TSharedPtr<FAgentExecutionNode>> Roots;
+    TSet<FString> KnownRunKeys;
+    TSet<FString> ExpandedNodeKeys;
+    int32 LastEventCount = INDEX_NONE;
+    int32 LastEventSequence = INDEX_NONE;
 };
 
 class SAgentChatWindow : public SCompoundWidget

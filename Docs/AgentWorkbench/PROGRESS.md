@@ -151,3 +151,11 @@
 - Run 开始时仍在内存中冻结当时可用的工具和处理器身份，用于目录查询、调用前校验与审批后复核；加入 `RunHistory` 的副本不再包含完整工具名单及处理器映射，保存的 Session JSON 也不再写入这两个字段。历史仍保存实际工具调用、参数、结果和关联 ID。旧版含完整目录的历史可以读取，再次保存时会去除这两个字段。
 - UE MCP 目录专项发现 876 个可调用工具，其中原有 5 个工具的 Schema 使用 `oneOf` 等组合规则，曾被调用前参数校验器拒绝。已补齐 `oneOf`、`anyOf`、`allOf` 的结构和参数匹配校验；全部 876 个已发现工具的 Schema 通过支持性检查。
 - 最新 DebugGame Editor Target 完整编译与链接退出码 0；Development Editor Target 使用 `-NoLink -NoHotReload` 源码编译退出码 0。用 `UnrealEditor-Win64-DebugGame-Cmd.exe` 执行自动化：`AgentWorkbenchCatalogSchemaCompositions` 1/1、`AgentWorkbenchSchemaCompositions` 5/5、`AgentWorkbenchCatalogCompositionsFull` 27/27、`BSHarnessMCPCatalogCompositionsFull` 13/13，均无失败或警告。`git diff --check` 退出码 0。当前图形 Development 编辑器仍运行旧 DLL，尚未完成 Development 链接和界面手工验收。
+
+## 2026-09-29 对话卡片、复制与执行树
+
+- 对话区只显示用户输入和每轮 Agent 最终回复的规则保持不变；用户卡片靠右，Agent 卡片靠左，使用角色标签、背景色和间距区分。正文使用只读可选中文本，支持选中后复制及卡片上的整条复制按钮。
+- 执行区按 Run 组成树：轮次根节点显示用户问题预览和状态，子节点为原有步骤描述，有详情时再展开为详情节点。步骤和解码后的详情均可选择复制，并有复制按钮；不显示 Run ID 或事件序号。新增事件时保留已展开节点；草稿变化且事件未变时不重建树；列表只有在用户原本位于底部时才跟随新内容，“最新”按钮可主动跳转。
+- 新增纯数据 `AgentWorkbench.Display.ExecutionTreeModel` 与 `ExecutionTreeStatus` 自动化，覆盖多轮及旧版无 Run ID 事件、步骤顺序、问题预览、空详情、历史中断后开启新一轮时的状态、终止状态优先级和 UTF-16 表情符号截断。复核 UE5.8 滚动 API 后，将“是否在底部”的判断改为比例阈值，并在树重建后的下一次布局请求滚动到目标节点，避免回看时跳底及新步骤不可见。
+- 最终 `UEHarnessEditor Win64 DebugGame -NoHotReload` 和 `UEHarnessEditor Win64 Development -NoHotReload` 均完整编译链接通过；DebugGame 命令行 `Automation RunTests AgentWorkbench` 报告 `Saved/Automation/AgentWorkbenchCopyTreeReviewed/index.json`：29/29 通过、无警告。用户关闭图形编辑器后，Development 命令行同套自动化报告 `Saved/Automation/AgentWorkbenchCopyTreeDevelopment/index.json`：29/29 通过、无警告、无失败或未运行项。
+- 用新 Development 二进制重启图形编辑器，确认 Agent Workbench 可打开、历史会话可切换、用户与 Agent 卡片左右分列、执行轮次可展开为步骤。通过系统剪贴板核对了用户消息、Agent 回复和执行步骤的整条复制按钮；验收后已关闭编辑器。旧历史按现有 `bPersistDetailedPayloads=false` 设置未保存详情正文，因此本次未手工验证详情节点与选中文字复制。

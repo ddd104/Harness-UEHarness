@@ -2,11 +2,15 @@
 #include "AgentAssetContextService.h"
 #include "AgentWorkbenchSettings.h"
 #include "AgentWorkbenchDisplayFormatter.h"
+#include "AgentExecutionTreeModel.h"
 #include "AgentModelClient.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "Containers/Ticker.h"
+#include "HAL/PlatformApplicationMisc.h"
 #include "Misc/MessageDialog.h"
 #include "InputCoreTypes.h"
+#include "Styling/StyleColors.h"
+#include "Brushes/SlateRoundedBoxBrush.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SComboBox.h"
 #include "Widgets/Input/SEditableTextBox.h"
@@ -14,15 +18,22 @@
 #include "Widgets/Input/SSpinBox.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
-#include "Widgets/Layout/SExpandableArea.h"
 #include "Widgets/Layout/SSplitter.h"
 #include "Widgets/Layout/SScrollBox.h"
+#include "Widgets/Layout/SSpacer.h"
 #include "Widgets/SBoxPanel.h"
+#include "Widgets/Text/SMultiLineEditableText.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Text/SInlineEditableTextBlock.h"
+#include "Widgets/Views/SExpanderArrow.h"
 #include "Widgets/Views/STableRow.h"
 
 #define LOCTEXT_NAMESPACE "AgentWorkbench"
+
+namespace
+{
+const FSlateRoundedBoxBrush AgentCardBrush(FLinearColor::White, 6.f);
+}
 
 void SAgentHistoryPanel::Construct(const FArguments& Args, TSharedRef<FAgentSessionManager> InManager, const FGuid& InCurrentSessionId)
 {
@@ -201,24 +212,71 @@ void SAgentConversationList::Construct(const FArguments& Args, TSharedRef<FAgent
     Session = InSession;
     VisibleMessages = FAgentWorkbenchDisplayFormatter::VisibleConversationMessages(Session->Messages);
     ChildSlot [ SNew(SBorder).Padding(8) [ SNew(SVerticalBox)
-        + SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 6) [ SNew(STextBlock).Text(LOCTEXT("Conversation", "对话记录")) ]
+        + SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 6) [ SNew(SHorizontalBox)
+            + SHorizontalBox::Slot().FillWidth(1).VAlign(VAlign_Center)
+                [ SNew(STextBlock).Text(LOCTEXT("Conversation", "对话记录")) ]
+            + SHorizontalBox::Slot().AutoWidth()
+                [ SNew(SButton).Text(LOCTEXT("ConversationLatest", "最新"))
+                    .OnClicked_Lambda([this]() { ScrollToLatest(); return FReply::Handled(); }) ] ]
         + SVerticalBox::Slot().FillHeight(1) [ SAssignNew(List, SListView<TSharedPtr<FAgentMessage>>)
-            .ListItemsSource(&VisibleMessages).OnGenerateRow(this, &SAgentConversationList::MakeRow) ]
+            .ListItemsSource(&VisibleMessages).OnGenerateRow(this, &SAgentConversationList::MakeRow)
+            .SelectionMode(ESelectionMode::None) ]
     ] ];
 }
 
 void SAgentConversationList::Refresh()
 {
-    VisibleMessages = FAgentWorkbenchDisplayFormatter::VisibleConversationMessages(Session->Messages);
-    if (List) { List->RequestListRefresh(); List->ScrollToBottom(); }
+    TArray<TSharedPtr<FAgentMessage>> Updated =
+        FAgentWorkbenchDisplayFormatter::VisibleConversationMessages(Session->Messages);
+    bool bChanged = Updated.Num() != VisibleMessages.Num();
+    if (!bChanged)
+    {
+        for (int32 Index = 0; Index < Updated.Num(); ++Index)
+        {
+            if (Updated[Index] != VisibleMessages[Index]) { bChanged = true; break; }
+        }
+    }
+    if (!bChanged) { return; }
+    // Slate reports the remaining scroll distance as a 0..1 proportion.
+    const bool bFollowLatest = List && !List->IsUserScrolling()
+        && List->GetScrollDistanceRemaining().Y <= 0.02f;
+    VisibleMessages = MoveTemp(Updated);
+    if (List)
+    {
+        List->RequestListRefresh();
+        if (bFollowLatest) { List->ScrollToBottom(); }
+    }
+}
+
+void SAgentConversationList::ScrollToLatest()
+{
+    if (List) { List->ScrollToBottom(); }
 }
 
 TSharedRef<ITableRow> SAgentConversationList::MakeRow(TSharedPtr<FAgentMessage> Item, const TSharedRef<STableViewBase>& Owner)
 {
-    const TCHAR* Role = Item->Role == EAgentMessageRole::User ? TEXT("用户") : TEXT("Agent");
-    return SNew(STableRow<TSharedPtr<FAgentMessage>>, Owner) [ SNew(SBorder).Padding(6) [
-        SNew(STextBlock).Text(FText::FromString(FString::Printf(TEXT("%s\n%s"), Role, *Item->Text))).AutoWrapText(true)
-    ] ];
+    const bool bUser = Item->Role == EAgentMessageRole::User;
+    const FString Text = Item->Text;
+    TSharedRef<SHorizontalBox> Aligned = SNew(SHorizontalBox);
+    if (bUser) { Aligned->AddSlot().FillWidth(1) [ SNew(SSpacer) ]; }
+    Aligned->AddSlot().FillWidth(4) [ SNew(SBorder)
+        .BorderImage(&AgentCardBrush)
+        .BorderBackgroundColor(bUser ? FStyleColors::SelectInactive : FStyleColors::Panel)
+        .Padding(10) [ SNew(SVerticalBox)
+            + SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 5) [ SNew(SHorizontalBox)
+                + SHorizontalBox::Slot().FillWidth(1).VAlign(VAlign_Center) [ SNew(STextBlock)
+                    .Text(bUser ? LOCTEXT("UserMessageLabel", "我") : LOCTEXT("AgentMessageLabel", "Agent"))
+                    .ColorAndOpacity(bUser ? FStyleColors::AccentBlue : FStyleColors::Foreground) ]
+                + SHorizontalBox::Slot().AutoWidth() [ SNew(SButton)
+                    .Text(LOCTEXT("CopyConversationMessage", "复制"))
+                    .ToolTipText(LOCTEXT("CopyConversationMessageHint", "复制整条消息"))
+                    .OnClicked_Lambda([Text]()
+                    { FPlatformApplicationMisc::ClipboardCopy(*Text); return FReply::Handled(); }) ] ]
+            + SVerticalBox::Slot().AutoHeight() [ SNew(SMultiLineEditableText)
+                .Text(FText::FromString(Text)).IsReadOnly(true).AutoWrapText(true)
+                .AllowContextMenu(true).ClearTextSelectionOnFocusLoss(false) ] ] ];
+    if (!bUser) { Aligned->AddSlot().FillWidth(1) [ SNew(SSpacer) ]; }
+    return SNew(STableRow<TSharedPtr<FAgentMessage>>, Owner).Padding(FMargin(3, 6)) [ Aligned ];
 }
 
 void SAgentAssetCandidatePanel::Construct(const FArguments& Args, TSharedRef<FAgentSession> InSession)
@@ -310,29 +368,174 @@ TSharedRef<ITableRow> SAgentAssetCandidatePanel::MakeRow(TSharedPtr<FAgentCandid
 void SAgentExecutionPanel::Construct(const FArguments& Args, TSharedRef<FAgentSession> InSession)
 {
     Session = InSession;
+    Roots = FAgentExecutionTreeModel::Build(*Session);
+    LastEventCount = Session->Events.Num();
+    LastEventSequence = Session->Events.IsEmpty() || !Session->Events.Last()
+        ? INDEX_NONE : Session->Events.Last()->Sequence;
+    for (const TSharedPtr<FAgentExecutionNode>& Root : Roots)
+    { if (Root) { KnownRunKeys.Add(NodeKey(*Root)); } }
+    if (!Roots.IsEmpty() && Roots.Last()) { ExpandedNodeKeys.Add(NodeKey(*Roots.Last())); }
     ChildSlot [ SNew(SBorder).Padding(8) [ SNew(SVerticalBox)
-        + SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 6) [ SNew(STextBlock).Text(LOCTEXT("Execution", "任务执行详情")) ]
-        + SVerticalBox::Slot().FillHeight(1) [ SAssignNew(List, SListView<TSharedPtr<FAgentEvent>>)
-            .ListItemsSource(&Session->Events).OnGenerateRow(this, &SAgentExecutionPanel::MakeRow) ]
+        + SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 6) [ SNew(SHorizontalBox)
+            + SHorizontalBox::Slot().FillWidth(1).VAlign(VAlign_Center)
+                [ SNew(STextBlock).Text(LOCTEXT("Execution", "任务执行详情")) ]
+            + SHorizontalBox::Slot().AutoWidth() [ SNew(SButton)
+                .Text(LOCTEXT("ExecutionLatest", "最新"))
+                .OnClicked_Lambda([this]()
+                { ScrollToLatest(); return FReply::Handled(); }) ] ]
+        + SVerticalBox::Slot().FillHeight(1) [ SAssignNew(Tree, STreeView<TSharedPtr<FAgentExecutionNode>>)
+            .TreeItemsSource(&Roots).OnGenerateRow(this, &SAgentExecutionPanel::MakeRow)
+            .OnGetChildren(this, &SAgentExecutionPanel::GetNodeChildren)
+            .OnExpansionChanged(this, &SAgentExecutionPanel::OnExpansionChanged)
+            .SelectionMode(ESelectionMode::None) ]
     ] ];
+    if (!Roots.IsEmpty() && Roots.Last()) { Tree->SetItemExpansion(Roots.Last(), true); }
 }
 
-void SAgentExecutionPanel::Refresh() { if (List) { List->RequestListRefresh(); List->ScrollToBottom(); } }
-
-TSharedRef<ITableRow> SAgentExecutionPanel::MakeRow(TSharedPtr<FAgentEvent> Item, const TSharedRef<STableViewBase>& Owner)
+FString SAgentExecutionPanel::NodeKey(const FAgentExecutionNode& Node) const
 {
-    const FString Detail = FAgentWorkbenchDisplayFormatter::FormatEventDetail(*Item);
-    if (Detail.IsEmpty())
+    const TCHAR* Prefix = Node.Kind == EAgentExecutionNodeKind::Run ? TEXT("run")
+        : Node.Kind == EAgentExecutionNodeKind::Step ? TEXT("step") : TEXT("detail");
+    return FString::Printf(TEXT("%s:%s:%d"), Prefix,
+        *Node.RunId.ToString(EGuidFormats::Digits), Node.Kind == EAgentExecutionNodeKind::Run ? 0 : Node.Sequence);
+}
+
+void SAgentExecutionPanel::GetNodeChildren(TSharedPtr<FAgentExecutionNode> Item,
+    TArray<TSharedPtr<FAgentExecutionNode>>& OutChildren) const
+{
+    if (Item) { OutChildren.Append(Item->Children); }
+}
+
+void SAgentExecutionPanel::OnExpansionChanged(TSharedPtr<FAgentExecutionNode> Item, bool bExpanded)
+{
+    if (!Item) { return; }
+    const FString Key = NodeKey(*Item);
+    if (bExpanded) { ExpandedNodeKeys.Add(Key); }
+    else { ExpandedNodeKeys.Remove(Key); }
+}
+
+void SAgentExecutionPanel::Refresh()
+{
+    const int32 EventCount = Session->Events.Num();
+    const int32 LastSequence = EventCount > 0 && Session->Events.Last()
+        ? Session->Events.Last()->Sequence : INDEX_NONE;
+    if (EventCount == LastEventCount && LastSequence == LastEventSequence) { return; }
+    const bool bFollowLatest = Tree && !Tree->IsUserScrolling()
+        && Tree->GetScrollDistanceRemaining().Y <= 0.02f;
+    const float PreviousOffset = Tree ? Tree->GetScrollOffset() : 0.f;
+    Roots = FAgentExecutionTreeModel::Build(*Session);
+    LastEventCount = EventCount;
+    LastEventSequence = LastSequence;
+    if (!Tree) { return; }
+    Tree->RequestTreeRefresh();
+    for (const TSharedPtr<FAgentExecutionNode>& Root : Roots)
     {
-        return SNew(STableRow<TSharedPtr<FAgentEvent>>, Owner) [ SNew(SBorder).Padding(6) [
-            SNew(STextBlock).Text(FText::FromString(Item->Summary)).AutoWrapText(true) ] ];
+        if (!Root) { continue; }
+        const FString RootKey = NodeKey(*Root);
+        if (!KnownRunKeys.Contains(RootKey))
+        {
+            KnownRunKeys.Add(RootKey);
+            ExpandedNodeKeys.Add(RootKey);
+        }
+        Tree->SetItemExpansion(Root, ExpandedNodeKeys.Contains(RootKey));
+        for (const TSharedPtr<FAgentExecutionNode>& Step : Root->Children)
+        {
+            if (Step && ExpandedNodeKeys.Contains(NodeKey(*Step)))
+            { Tree->SetItemExpansion(Step, true); }
+        }
     }
-    return SNew(STableRow<TSharedPtr<FAgentEvent>>, Owner) [ SNew(SExpandableArea)
-        .InitiallyCollapsed(true)
-        .HeaderContent() [ SNew(STextBlock).Text(FText::FromString(Item->Summary)).AutoWrapText(true) ]
-        .BodyContent() [ SNew(SBox).MaxDesiredHeight(480) [ SNew(SScrollBox)
-            + SScrollBox::Slot() [ SNew(STextBlock).Text(FText::FromString(Detail)).AutoWrapText(true) ] ] ]
-    ];
+    if (bFollowLatest) { ScrollToLatest(); }
+    else { Tree->SetScrollOffset(PreviousOffset); }
+}
+
+void SAgentExecutionPanel::ScrollToLatest()
+{
+    if (!Tree || Roots.IsEmpty() || !Roots.Last()) { return; }
+    TSharedPtr<FAgentExecutionNode> Latest = Roots.Last();
+    if (ExpandedNodeKeys.Contains(NodeKey(*Latest)) && !Latest->Children.IsEmpty())
+    {
+        Latest = Latest->Children.Last();
+        if (ExpandedNodeKeys.Contains(NodeKey(*Latest)) && !Latest->Children.IsEmpty())
+        { Latest = Latest->Children.Last(); }
+    }
+    // RequestScrollIntoView resolves after STreeView rebuilds its visible rows on Tick.
+    Tree->RequestScrollIntoView(Latest);
+}
+
+TSharedRef<ITableRow> SAgentExecutionPanel::MakeRow(TSharedPtr<FAgentExecutionNode> Item,
+    const TSharedRef<STableViewBase>& Owner)
+{
+    TSharedRef<STableRow<TSharedPtr<FAgentExecutionNode>>> Row =
+        SNew(STableRow<TSharedPtr<FAgentExecutionNode>>, Owner).Padding(FMargin(2, 4));
+    if (Item->Kind == EAgentExecutionNodeKind::Detail)
+    {
+        const FString Detail = Item->Event
+            ? FAgentWorkbenchDisplayFormatter::FormatEventDetail(*Item->Event) : FString();
+        Row->SetContent(SNew(SHorizontalBox)
+            + SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Top)
+                [ SNew(SExpanderArrow, Row).ShouldDrawWires(true) ]
+            + SHorizontalBox::Slot().FillWidth(1) [ SNew(SBorder)
+                .BorderImage(&AgentCardBrush)
+                .BorderBackgroundColor(FStyleColors::Recessed).Padding(8)
+                [ SNew(SVerticalBox)
+                    + SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right)
+                        [ SNew(SButton).Text(LOCTEXT("CopyExecutionDetail", "复制详情"))
+                            .OnClicked_Lambda([Detail]()
+                            { FPlatformApplicationMisc::ClipboardCopy(*Detail); return FReply::Handled(); }) ]
+                    + SVerticalBox::Slot().AutoHeight() [ SNew(SBox).MaxDesiredHeight(400)
+                        [ SNew(SScrollBox)
+                            + SScrollBox::Slot() [ SNew(SMultiLineEditableText)
+                                .Text(FText::FromString(Detail)).IsReadOnly(true).AutoWrapText(true)
+                                .AllowContextMenu(true).ClearTextSelectionOnFocusLoss(false) ] ] ] ] ]);
+        return Row;
+    }
+    if (Item->Kind == EAgentExecutionNodeKind::Run)
+    {
+        FString Status = TEXT("未完成");
+        FSlateColor StatusColor = FStyleColors::Secondary;
+        switch (FAgentExecutionTreeModel::StatusFor(*Session, *Item))
+        {
+        case EAgentExecutionRunStatus::Completed:
+            Status = TEXT("已完成"); StatusColor = FStyleColors::Success; break;
+        case EAgentExecutionRunStatus::Failed:
+            Status = TEXT("失败"); StatusColor = FStyleColors::Error; break;
+        case EAgentExecutionRunStatus::Cancelled:
+            Status = TEXT("已停止"); StatusColor = FStyleColors::Warning; break;
+        case EAgentExecutionRunStatus::Running:
+            Status = TEXT("进行中"); StatusColor = FStyleColors::AccentBlue; break;
+        case EAgentExecutionRunStatus::Interrupted:
+            Status = TEXT("已中断"); StatusColor = FStyleColors::Warning; break;
+        default: break;
+        }
+        const FString Title = Item->Title;
+        Row->SetContent(SNew(SBorder)
+            .BorderImage(&AgentCardBrush)
+            .BorderBackgroundColor(FStyleColors::Panel).Padding(FMargin(6, 8))
+            [ SNew(SHorizontalBox)
+                + SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+                    [ SNew(SExpanderArrow, Row).ShouldDrawWires(true) ]
+                + SHorizontalBox::Slot().FillWidth(1).VAlign(VAlign_Center)
+                    [ SNew(SMultiLineEditableText).Text(FText::FromString(Title))
+                        .IsReadOnly(true).AutoWrapText(true).AllowContextMenu(true) ]
+                + SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(5, 0)
+                    [ SNew(STextBlock).Text(FText::FromString(Status)).ColorAndOpacity(StatusColor) ] ]);
+        return Row;
+    }
+    const FString Summary = Item->Title;
+    Row->SetContent(SNew(SBorder)
+        .BorderImage(&AgentCardBrush)
+        .BorderBackgroundColor(FStyleColors::Recessed).Padding(FMargin(5, 6))
+        [ SNew(SHorizontalBox)
+            + SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+                [ SNew(SExpanderArrow, Row).ShouldDrawWires(true) ]
+            + SHorizontalBox::Slot().FillWidth(1).VAlign(VAlign_Center)
+                [ SNew(SMultiLineEditableText).Text(FText::FromString(Summary))
+                    .IsReadOnly(true).AutoWrapText(true).AllowContextMenu(true) ]
+            + SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+                [ SNew(SButton).Text(LOCTEXT("CopyExecutionStep", "复制"))
+                    .OnClicked_Lambda([Summary]()
+                    { FPlatformApplicationMisc::ClipboardCopy(*Summary); return FReply::Handled(); }) ] ]);
+    return Row;
 }
 
 void SAgentChatWindow::Construct(const FArguments& Args)
@@ -392,7 +595,9 @@ FReply SAgentChatWindow::Send()
     Manager->UpdateWindowTitle(Session.ToSharedRef());
     Input->SetText(FText::GetEmpty());
     ConversationList->Refresh();
+    ConversationList->ScrollToLatest();
     ExecutionPanel->Refresh();
+    ExecutionPanel->ScrollToLatest();
     AssetPanel->Refresh();
     HistoryPanel->Refresh();
     Manager->NotifySessionsChanged();
