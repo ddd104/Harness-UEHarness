@@ -33,6 +33,15 @@
 namespace
 {
 const FSlateRoundedBoxBrush AgentCardBrush(FLinearColor::White, 6.f);
+FText ApprovalModeLabel(EAgentApprovalMode Mode)
+{
+    switch (Mode)
+    {
+    case EAgentApprovalMode::Smart: return LOCTEXT("SmartApproval", "智能批准");
+    case EAgentApprovalMode::Unrestricted: return LOCTEXT("UnrestrictedApproval", "无限制修改");
+    default: return LOCTEXT("AskApproval", "询问修改");
+    }
+}
 
 void HighlightExecutionCardOnHover(const TSharedRef<SBorder>& Card, const FSlateColor NormalColor)
 {
@@ -604,6 +613,9 @@ void SAgentChatWindow::Construct(const FArguments& Args)
     Session = Args._Session;
     Manager = Args._Manager;
     check(Session && Manager);
+    ApprovalChoices = {MakeShared<EAgentApprovalMode>(EAgentApprovalMode::Ask),
+        MakeShared<EAgentApprovalMode>(EAgentApprovalMode::Smart),
+        MakeShared<EAgentApprovalMode>(EAgentApprovalMode::Unrestricted)};
     Session->OnUiChanged.AddSP(this, &SAgentChatWindow::RefreshAfterRun);
     ChildSlot [ SNew(SVerticalBox)
         + SVerticalBox::Slot().FillHeight(1) [ SNew(SSplitter).Orientation(Orient_Horizontal)
@@ -621,7 +633,17 @@ void SAgentChatWindow::Construct(const FArguments& Args)
                         .OnTextChanged_Lambda([this](const FText& Text) { Session->DraftText = Text.ToString(); Session->Touch(); })
                         .OnKeyDownHandler(this, &SAgentChatWindow::OnInputKeyDown) ] ]
                     + SVerticalBox::Slot().AutoHeight() [ SNew(STextBlock).Text_Lambda([this]() { return FText::FromString(SendError); }).AutoWrapText(true) ]
-                    + SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right).Padding(0, 6, 0, 0) [ SNew(SHorizontalBox)
+                    + SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Fill).Padding(0, 6, 0, 0) [ SNew(SHorizontalBox)
+                        + SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 8, 0)
+                            [ SNew(SComboBox<TSharedPtr<EAgentApprovalMode>>).OptionsSource(&ApprovalChoices)
+                                .ToolTipText(LOCTEXT("ApprovalModeTooltip", "询问修改：逐次确认编辑和打开资产；智能批准：自动允许已明确列入只读名单的工具，其余逐次确认；无限制修改：自动允许已注册工具，仍执行参数、路径和超时校验。发送时固定本轮权限。"))
+                                .OnGenerateWidget_Lambda([](TSharedPtr<EAgentApprovalMode> Mode)
+                                { return SNew(STextBlock).Text(ApprovalModeLabel(*Mode)); })
+                                .OnSelectionChanged_Lambda([this](TSharedPtr<EAgentApprovalMode> Mode, ESelectInfo::Type)
+                                { if (Mode) { Session->ApprovalMode = *Mode; Session->Touch(); } })
+                                [ SNew(STextBlock).Text_Lambda([this]()
+                                { return ApprovalModeLabel(Session->ApprovalMode); }) ] ]
+                        + SHorizontalBox::Slot().FillWidth(1) [ SNew(SSpacer) ]
                         + SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 6, 0) [ SNew(SButton).Text(LOCTEXT("Stop", "停止"))
                             .IsEnabled_Lambda([this]() { return Session->Runner.State == EAgentRunState::Running; }).OnClicked(this, &SAgentChatWindow::Stop) ]
                         + SHorizontalBox::Slot().AutoWidth() [ SNew(SButton).Text(LOCTEXT("Send", "发送"))

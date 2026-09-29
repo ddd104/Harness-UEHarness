@@ -20,12 +20,19 @@ bool FAgentWorkbenchSessionIsolationTest::RunTest(const FString& Parameters)
     FAgentSession A;
     FAgentSession B;
     A.ModelOptions.Model = TEXT("Model A");
+    A.ApprovalMode = EAgentApprovalMode::Unrestricted;
     B.ModelOptions.Model = TEXT("Model B");
     A.DraftText = TEXT("Message A");
     B.DraftText = TEXT("Message B");
     TestNotEqual(TEXT("Session IDs are unique"), A.SessionId, B.SessionId);
     FString Error;
     TestTrue(TEXT("A starts a run"), A.BeginRun(Error));
+    TestEqual(TEXT("Approval mode is frozen at send"), A.Runner.LastSnapshot->ApprovalMode,
+        EAgentApprovalMode::Unrestricted);
+    A.ApprovalMode = EAgentApprovalMode::Ask;
+    TestEqual(TEXT("Changing next-run approval does not change active run"),
+        A.Runner.LastSnapshot->ApprovalMode, EAgentApprovalMode::Unrestricted);
+    TestEqual(TEXT("Other session keeps its own approval mode"), B.ApprovalMode, EAgentApprovalMode::Ask);
     A.CompleteRun(A.Runner.CurrentRunId, TEXT("Provider response"));
     TestEqual(TEXT("A has a user and provider reply"), A.Messages.Num(), 2);
     TestEqual(TEXT("B has no messages"), B.Messages.Num(), 0);
@@ -43,6 +50,34 @@ bool FAgentWorkbenchSessionIsolationTest::RunTest(const FString& Parameters)
     Cancelled.CompleteRun(CancelledRunId, TEXT("Late response"));
     TestEqual(TEXT("Cancelled run ignores late response"), Cancelled.Runner.State, EAgentRunState::Cancelled);
     TestEqual(TEXT("No fabricated late assistant message"), Cancelled.Messages.Num(), 1);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAgentWorkbenchShutdownPersistenceTest,
+    "AgentWorkbench.History.ShutdownKeepsLastSafeSave",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAgentWorkbenchShutdownPersistenceTest::RunTest(const FString& Parameters)
+{
+    const FString Directory = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Automation"),
+        TEXT("AgentWorkbenchShutdown"), FGuid::NewGuid().ToString(EGuidFormats::Digits));
+    TSharedRef<FAgentSessionManager> Manager = MakeShared<FAgentSessionManager>(Directory);
+    TSharedRef<FAgentSession> Session = Manager->CreateSession();
+    Session->DraftText = TEXT("Started before shutdown");
+    FString Error;
+    TestTrue(TEXT("Run starts and is persisted"), Session->BeginRun(Error));
+    Manager->Shutdown();
+    TestEqual(TEXT("In-memory work is cancelled"), Session->Runner.State,
+        EAgentRunState::Cancelled);
+    TArray<TSharedPtr<FAgentSession>> Restored;
+    TArray<FString> Errors;
+    FAgentWorkbenchHistory::LoadAll(Directory, Restored, Errors, false);
+    TestEqual(TEXT("Last safe save is readable"), Restored.Num(), 1);
+    if (Restored.Num() == 1)
+    {
+        TestEqual(TEXT("Run resumes as interrupted instead of replaying"),
+            Restored[0]->Runner.State, EAgentRunState::Interrupted);
+    }
     return true;
 }
 

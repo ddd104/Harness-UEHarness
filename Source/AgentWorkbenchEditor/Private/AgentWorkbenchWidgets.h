@@ -118,5 +118,6 @@ private:
     TSharedPtr<SAgentExecutionPanel> ExecutionPanel;
     TSharedPtr<SAgentAssetCandidatePanel> AssetPanel;
     TSharedPtr<SMultiLineEditableTextBox> Input;
+    TArray<TSharedPtr<EAgentApprovalMode>> ApprovalChoices;
     FString SendError;
 };

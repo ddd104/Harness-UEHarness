@@ -122,9 +122,13 @@ void AddBinding(TMap<FString, FUnrealBinding>& Next,
     FMCPToolDefinition Definition;
     Definition.Name = RegistryName;
     Definition.Description = FString::Printf(TEXT("UE MCP tool %s. %s"), *Binding.FullName, *Description);
+    if (Binding.FullName == TEXT("editor_toolset.toolsets.blueprint.BlueprintTools.write_graph_dsl"))
+    {
+        Definition.Description += TEXT(" This tool compiles the Blueprint itself. Do not call compile_blueprint again unless later edits require it.");
+    }
     if (Binding.bRequiresApproval)
     {
-        Definition.Description += TEXT(" Requires explicit user approval before execution.");
+        Definition.Description += TEXT(" Approval follows the run's selected permission mode.");
     }
     Definition.InputSchema = Schema;
     Binding.InputSchema = Schema;

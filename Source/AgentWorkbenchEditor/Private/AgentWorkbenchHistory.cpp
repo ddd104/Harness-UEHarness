@@ -71,6 +71,7 @@ FJson SnapshotToJson(const FAgentRunInputSnapshot& Snapshot)
     Json->SetStringField(TEXT("model"), Snapshot.ModelOptions.Model);
     Json->SetStringField(TEXT("provider"), Snapshot.Provider);
     Json->SetNumberField(TEXT("provider_type"), static_cast<int32>(Snapshot.ProviderType));
+    Json->SetNumberField(TEXT("approval_mode"), static_cast<int32>(Snapshot.ApprovalMode));
     Json->SetNumberField(TEXT("max_output_tokens"), Snapshot.ModelOptions.MaxOutputTokens);
     Json->SetNumberField(TEXT("request_timeout_seconds"), Snapshot.RequestTimeoutSeconds);
     Json->SetNumberField(TEXT("tool_timeout_seconds"), Snapshot.ToolTimeoutSeconds);
@@ -191,6 +192,10 @@ bool ReadSnapshot(const FJsonObject& Json, FAgentRunInputSnapshot& Out)
     if (Json.TryGetNumberField(TEXT("provider_type"), ProviderType)
         && ProviderType >= 0 && ProviderType <= static_cast<int32>(EAgentWorkbenchProvider::Ollama))
     { Out.ProviderType = static_cast<EAgentWorkbenchProvider>(ProviderType); }
+    int32 ApprovalMode = 0;
+    if (Json.TryGetNumberField(TEXT("approval_mode"), ApprovalMode)
+        && ApprovalMode >= 0 && ApprovalMode <= static_cast<int32>(EAgentApprovalMode::Unrestricted))
+    { Out.ApprovalMode = static_cast<EAgentApprovalMode>(ApprovalMode); }
     int32 Limit = 0;
     if (Json.TryGetNumberField(TEXT("request_timeout_seconds"), Limit) && Limit > 0)
     { Out.RequestTimeoutSeconds = Limit; }
@@ -238,6 +243,7 @@ FJson SessionToJson(const FAgentSession& Session)
     Json->SetStringField(TEXT("model"), Session.ModelOptions.Model);
     Json->SetNumberField(TEXT("max_output_tokens"), Session.ModelOptions.MaxOutputTokens);
     Json->SetStringField(TEXT("draft"), Session.DraftText);
+    Json->SetNumberField(TEXT("approval_mode"), static_cast<int32>(Session.ApprovalMode));
     Json->SetNumberField(TEXT("run_state"), static_cast<int32>(Session.Runner.State));
     TArray<TSharedPtr<FJsonValue>> Candidates;
     for (const TSharedPtr<FAgentCandidate>& Candidate : Session.Candidates)
@@ -292,6 +298,10 @@ bool SessionFromJson(const FJsonObject& Json, FAgentSession& Session)
     Json.TryGetStringField(TEXT("model"), Session.ModelOptions.Model);
     Json.TryGetNumberField(TEXT("max_output_tokens"), Session.ModelOptions.MaxOutputTokens);
     Json.TryGetStringField(TEXT("draft"), Session.DraftText);
+    int32 ApprovalMode = 0;
+    if (Json.TryGetNumberField(TEXT("approval_mode"), ApprovalMode)
+        && ApprovalMode >= 0 && ApprovalMode <= static_cast<int32>(EAgentApprovalMode::Unrestricted))
+    { Session.ApprovalMode = static_cast<EAgentApprovalMode>(ApprovalMode); }
     int32 State = 0;
     Json.TryGetNumberField(TEXT("run_state"), State);
     Session.Runner.State = State == static_cast<int32>(EAgentRunState::Running)

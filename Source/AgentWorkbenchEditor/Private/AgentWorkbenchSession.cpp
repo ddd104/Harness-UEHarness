@@ -90,6 +90,7 @@ bool FAgentSession::BeginRun(FString& OutError)
     const UAgentWorkbenchSettings* Settings = GetDefault<UAgentWorkbenchSettings>();
     Snapshot.ProviderType = Settings->ProviderType;
     Snapshot.Provider = FAgentModelClient::ProviderName(Snapshot.ProviderType);
+    Snapshot.ApprovalMode = ApprovalMode;
     Snapshot.RequestTimeoutSeconds = FMath::Max(1, Settings->RequestTimeoutSeconds);
     Snapshot.ToolTimeoutSeconds = FMath::Max(1, Settings->ToolTimeoutSeconds);
     Snapshot.RunTimeoutSeconds = FMath::Max(1, Settings->RunTimeoutSeconds);
@@ -403,6 +404,7 @@ TSharedRef<FAgentSession> FAgentSessionManager::ForkSession(const TSharedRef<FAg
     Fork->Title = Source->Title + TEXT(" (分叉)");
     Fork->bTitleManuallySet = true;
     Fork->ModelOptions = Source->ModelOptions;
+    Fork->ApprovalMode = Source->ApprovalMode;
     Fork->DraftText = Source->DraftText;
     for (const TSharedPtr<FAgentCandidate>& Candidate : Source->Candidates)
     { if (Candidate) { Fork->Candidates.Add(MakeShared<FAgentCandidate>(*Candidate)); } }
@@ -628,7 +630,14 @@ void FAgentSessionManager::Shutdown()
 {
     check(IsInGameThread());
     for (const TSharedPtr<FAgentSession>& Session : Sessions)
-    { if (Session && Session->HasStartedRun()) { Session->CancelRun(); Session->Touch(); } }
+    {
+        if (!Session) { continue; }
+        // Every prior state change has already been saved. A Running state is read back as
+        // Interrupted on startup. Do not create a fresh UDeveloperSettings CDO while
+        // editor modules and UObject classes are being torn down.
+        Session->OnChanged = nullptr;
+        Session->Runner.Cancel();
+    }
     for (auto& Pair : Windows)
     {
         if (TSharedPtr<SWindow> Window = Pair.Value.Pin())

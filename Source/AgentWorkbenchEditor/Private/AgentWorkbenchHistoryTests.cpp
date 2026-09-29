@@ -24,6 +24,7 @@ bool FAgentHistoryRoundTripTest::RunTest(const FString& Parameters)
     Original.DraftText = TEXT("未发送草稿");
     Original.ModelOptions.Model = TEXT("saved-model");
     Original.ModelOptions.MaxOutputTokens = 321;
+    Original.ApprovalMode = EAgentApprovalMode::Smart;
     Original.Runner.State = EAgentRunState::Running;
     TSharedPtr<FAgentCandidate> Candidate = MakeShared<FAgentCandidate>();
     Candidate->DisplayName = TEXT("LostBlueprint");
@@ -39,6 +40,7 @@ bool FAgentHistoryRoundTripTest::RunTest(const FString& Parameters)
     Run.ModelOptions = Original.ModelOptions;
     Run.Provider = TEXT("Google Gemini");
     Run.ProviderType = EAgentWorkbenchProvider::Gemini;
+    Run.ApprovalMode = EAgentApprovalMode::Unrestricted;
     Run.RequestTimeoutSeconds = 30;
     Run.ToolTimeoutSeconds = 12;
     Run.RunTimeoutSeconds = 150;
@@ -104,6 +106,7 @@ bool FAgentHistoryRoundTripTest::RunTest(const FString& Parameters)
         TestEqual(TEXT("Draft restored"), Restored.DraftText, Original.DraftText);
         TestEqual(TEXT("Model restored"), Restored.ModelOptions.Model, Original.ModelOptions.Model);
         TestEqual(TEXT("Token setting restored"), Restored.ModelOptions.MaxOutputTokens, 321);
+        TestEqual(TEXT("Next-run approval mode restored"), Restored.ApprovalMode, EAgentApprovalMode::Smart);
         TestEqual(TEXT("Candidate count restored"), Restored.Candidates.Num(), 1);
         if (Restored.Candidates.Num() == 1)
         {
@@ -147,6 +150,8 @@ bool FAgentHistoryRoundTripTest::RunTest(const FString& Parameters)
             TestEqual(TEXT("Historical asset path retained"), Restored.RunHistory[0].IncludedAssets[0].ObjectPath, Frozen.ObjectPath);
             TestEqual(TEXT("Historical model retained"), Restored.RunHistory[0].ModelOptions.Model, FString(TEXT("saved-model")));
             TestEqual(TEXT("Historical provider type retained"), Restored.RunHistory[0].ProviderType, EAgentWorkbenchProvider::Gemini);
+            TestEqual(TEXT("Historical approval mode retained"), Restored.RunHistory[0].ApprovalMode,
+                EAgentApprovalMode::Unrestricted);
             TestEqual(TEXT("Historical request timeout retained"), Restored.RunHistory[0].RequestTimeoutSeconds, 30);
             TestEqual(TEXT("Historical tool timeout retained"), Restored.RunHistory[0].ToolTimeoutSeconds, 12);
             TestEqual(TEXT("Historical run timeout retained"), Restored.RunHistory[0].RunTimeoutSeconds, 150);

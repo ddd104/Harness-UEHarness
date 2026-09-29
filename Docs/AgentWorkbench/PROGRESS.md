@@ -175,3 +175,39 @@
 - UE5.8 的 `STableRow` 会在第二次快速点击时先自动切换展开状态，随后卡片的鼠标松开回调再切换一次。执行树现已接管双击，保证卡片每次点击只切换一次。轮次及步骤卡片通过鼠标进入、离开事件高亮和恢复；使用固定 16 像素的外置滚动条槽，列表在滚动条出现时保持宽度。
 - 最新代码的 DebugGame Editor Target 完整编译链接通过；Development Editor Target 使用 `-NoLink -NoHotReload` 源码编译通过。双击及滚动条改动后执行 `Automation RunTests AgentWorkbench`，报告 `Saved/Automation/AgentWorkbenchExecutionTreeInteraction/index.json`：30/30 成功、0 失败，另有 1 条无关的引擎联网探测超时警告。随后把悬停检测限定到卡片本身，重新完成 DebugGame 链接及 Development 源码编译；该阶段自动化没有重复运行，因为原测试不覆盖鼠标悬停。
 - 用户保存并关闭原 Development 编辑器后，最新 Development Editor Target 完整编译链接通过；其命令行自动化报告 `Saved/Automation/AgentWorkbenchExecutionTreeInteractionDevelopment/index.json`：30/30 成功、无警告。使用新 Development 二进制在图形编辑器打开旧历史，实际验证轮次和步骤连续点击两次后回到原展开状态、鼠标悬停高亮且移出恢复、旧记录可展开查看工具调用参数，以及滚动条出现和消失时卡片右边界保持不变。验收后已关闭本次启动的工作台和编辑器。
+
+## 2026-09-29 蓝图与材质修改的编辑器视图跟随
+
+- 工具流程新增独立的执行前、执行后观察者接口，保持原有前置 Gate、审批、工具分派及结果回传分离。只识别本机 `EditorToolset` 的蓝图和材质修改工具；审批并校验参数后，根据工具参数中的 `/Game` 资产路径打开目标编辑器。无法唯一识别资产时跳过界面操作，不猜测目标。
+- 蓝图在工具执行前尽量切到目标图；成功后通知图变化，并定位新增图或新增、被引用的节点。材质工具本身已刷新编辑器，观察者只聚焦窗口并用表达式 GUID 在打开的预览资产中定位节点，避免再次从源资产刷新导致待应用编辑丢失。取消、工具失败、无人值守时不进行后置定位；视图定位不改变工具结果，不自动编译或保存。
+- `UEHarnessEditor Win64 Development -MaxParallelActions=2` 完整编译链接成功。首次自动化进程启动早期退出且未产生测试报告；使用已验证的命令行参数重试后，`Saved/Automation/AgentWorkbenchAssetViewFollowRetry/index.json` 2/2 成功。新增观察者调度回归后，`Saved/Automation/AgentWorkbenchAssetViewFollowFinal/index.json` 3/3 成功。整套 `AgentWorkbench` 报告 `Saved/Automation/AgentWorkbenchAssetViewFull/index.json`：31/32 成功；唯一失败是既有 `SettingsDefaults` 测试期待工具超时 60 秒，而当前项目设置为 300 秒，与本次改动无关，未改动用户配置。最终源码再次完成 Development 编译链接，`Saved/Automation/AgentWorkbenchAssetViewFollowVerified/index.json`：3/3 成功；`git diff --check` 通过。实际图形编辑器中的蓝图和材质节点定位尚未手工验收。
+
+## 2026-09-29 发送栏权限选择
+
+- “发送”同行新增按 Session 保存的权限下拉：询问修改（默认）、智能批准、无限制修改。发送时冻结选择到 Run 快照；历史和分叉保留选择，运行中更改仅影响下一轮。
+- 智能批准只自动放行经过本地逐项列入名单的只读 UE 工具（蓝图图列表、变量列表和技能列表）；其他需要审批的工具继续询问。无限制修改跳过本轮已注册工具的确认窗口，但保留冻结目录、处理器身份、参数 Schema、资产路径、取消及超时校验。询问修改保留原有逐次确认行为；无法弹窗时拒绝需确认的调用。
+- `UEHarnessEditor Win64 Development -MaxParallelActions=2` 完整编译链接两次通过。命令行自动化报告 `Saved/Automation/AgentWorkbenchApprovalModes/index.json`、`AgentWorkbenchApprovalHistory/index.json`、`AgentWorkbenchApprovalSession/index.json` 分别 1/1 成功，共 3/3。首次尝试在单个 `ExecCmds` 中串联三条测试命令只执行首条；其余两项随后单独运行通过。图形编辑器里的下拉交互和真实资产修改尚未手工验收。
+
+## 2026-09-29 权限位置与修改前显示资产
+
+- 发送栏改为左侧权限选择、右侧停止与发送，宽度变化时由中间弹性空白隔开。
+- 已确认原流程在工具分派前同步调用 `OpenEditorForAsset`，但同一 Game Thread 调用内紧接着执行工具，Slate 没有机会绘制新窗口，因此观感上变成修改完成后才打开。现在视图跟随者报告需要可见帧时，先打开并定位资产编辑器，再跨过至少一个 Slate 绘制帧后分派工具；等待期间重新校验取消和总超时。工具完成后原有图刷新与节点定位仍逐步执行。
+- 从现有历史核查实际 `write_graph_dsl` 参数使用嵌套 `graph.refPath`；增加该形状的路径识别回归。最终 `UEHarnessEditor Win64 Development -MaxParallelActions=2` 完整编译链接通过，`Saved/Automation/AgentWorkbenchVisibleEditorFrameFinal/index.json` 报告 `AgentWorkbench.ToolWorkflow` 5/5 成功，`git diff --check` 通过。图形编辑器中的真实蓝图和材质修改仍待手工确认实际绘制与刷新效果。
+
+## 2026-09-29 修改任务期间崩溃排查
+
+- 最近一次图形编辑器日志 `Saved/Logs/UEHarness-backup-2026.09.29-14.37.42.log` 记录：`/Game/TopDown/Input/TEST.TEST` 在 `write_graph_dsl` 时编译一次，随后模型又调用 `compile_blueprint` 再编译一次；约 13 秒后引擎 Tick 系统报 `Pure virtual not implemented`（`FTickFunction::ExecuteTick`）。本次没有生成可定位具体 Tick 对象的 CrashContext/调用栈，不能断言重复编译是唯一原因。插件已停止在工具编译后额外调用 `NotifyGraphChanged`；对 `write_graph_dsl` 不再留下指向编译后节点的跳转操作；目录说明明确该工具已自行编译，减少重复编译请求。真实图形编辑器内的同类修改尚未安全复现验证。
+- 较早四份 CrashContext 均明确落在模块退出期间 `FAgentSessionManager::Shutdown` → `Touch` → `SessionToJson` → `GetDefault<UAgentWorkbenchSettings>`，访问已拆卸的 UObject 类。关闭时现在停止活跃请求并解绑持久化回调，不再重复保存；先前每次状态变更已落盘，重启时将仍标记 Running 的历史恢复为 Interrupted。新增 `History.ShutdownKeepsLastSafeSave` 回归。
+- 有编辑器进程占用时曾尝试独立 DebugGame 完整构建，但系统提交内存不足，构建器反复中止任务，主动停止该尝试。随后 Development 单并发源码编译和编辑器退出后的完整编译链接均成功。`Saved/Automation/AgentWorkbenchCrashShutdown/index.json` 1/1 成功，`Saved/Automation/AgentWorkbenchCrashWorkflow/index.json` 5/5 成功，命令行退出码均为 0。运行时纯虚函数崩溃还缺少同场景复验结果。
+
+## 2026-09-29 同一轮重复编译蓝图的崩溃规避
+
+- 最新日志 `Saved/Logs/UEHarness.log` 中，`/Game/TopDown/Input/TEST.TEST` 于 15:00:31 和 15:00:37 连续编译；用户提供的 15:00:37.966 错误落在引擎 `FTickFunction::ExecuteTick` 纯虚函数。历史会话 `Saved/AgentWorkbench/Sessions/AF36877E4BFC1292EC3AE6B0963E751B.json` 确认同一 Run 顺序为 `write_graph_dsl`、`read_graph_dsl`、`compile_blueprint`。本机 UE5.8 的 `BlueprintTools.write_graph_dsl` 实现会在写图后自行编译，后续编译没有对应的新修改。
+- 工具流程现在按 Run 和资产路径记录成功的 `write_graph_dsl`，允许中间读取和目录查询；随后对同一蓝图请求默认 `compile_blueprint` 时直接回报已编译，避免再次调用引擎编译。中间有其他工具调用、写图失败、路径不同、不同 Run，或请求 `warnings_as_errors=true` 时仍执行真实编译。跳过前仍验证冻结工具身份和参数 Schema。
+- `UEHarnessEditor Win64 Development -MaxParallelActions=2` 完整编译链接成功。`Saved/Automation/AgentWorkbenchCrashRepeatCompile/index.json` 报告 `AgentWorkbench.ToolWorkflow` 6/6 成功；新增回归覆盖上述跳过与不跳过情形。`git diff --check` 和 `git diff --cached --check` 均通过。命令行自动化未复现原先带蓝图预览的图形编辑器场景；本次用户日志没有对应的 CrashContext 调用栈，仍需用新 DLL 在图形编辑器复测该操作，不能把重复编译断言为唯一根因。
+
+## 2026-09-29 审批后同帧编译造成的 Tick 崩溃风险
+
+- 用户再次复现 `FTickFunction::ExecuteTick` 纯虚崩溃。最新日志 `Saved/Logs/UEHarness.log` 的帧 `[705]` 中，15:24:57.646 审批窗口销毁，15:24:58.134 编译 `/Game/TopDown/Input/TEST.TEST`，15:24:58.648 出现 `Script Stack (0 frames)`，随后记录纯虚致命错误。对应历史 `Saved/AgentWorkbench/Sessions/03F69F9E48FE797BD5A4BD8BBC0B46DC.json` 是先以 `ObjectTools.set_properties` 修改 `TEST.TEST_C:Cube_GEN_VARIABLE.overrideMaterials`，约 8 秒后显式调用 `BlueprintTools.compile_blueprint`；本轮没有 `write_graph_dsl`，因此前一轮的重复编译拦截不适用。
+- 本机 UE5.8 源码说明 `AddModalWindow` 会暂停主引擎 Tick 并运行嵌套 Slate 循环；原流程在其返回后直接执行 UE 工具。新流程对全部实际 UE MCP 工具调用（包括无审批的“无限制修改”模式）统一等待两次 CoreTicker：先退出当前主循环帧，再经过一次 `GEngine->Tick` 后执行。目录查询仍即时执行；派发前保留取消、总期限检查，桥接层继续复核冻结身份和参数。连续 UE 工具调用各自跨帧，避免同步回调递归地在同一帧连写和编译。`Cube_GEN_VARIABLE` 来自引擎蓝图组件子对象 API，现有证据不足以认定直接属性设置非法，未擅自封禁该能力。
+- 最终 `UEHarnessEditor Win64 Development -MaxParallelActions=2` 完整编译链接成功；`Saved/Automation/AgentWorkbenchCrashDispatchFrameVerified/index.json` 报告 `AgentWorkbench.ToolWorkflow` 7/7 成功。新增执行前观察点直接记录桥接层派发帧，真实 UE Toolset 只读调用验证“无限制修改”下派发帧号严格晚于调用帧；避免把异步工具的返回帧误当作派发帧。首次回归曾因把目录查询一并延后而使原同步观察者测试失败，修正为只延后实际 UE 工具后重跑全绿。`git diff --check` 与 `git diff --cached --check` 通过。当前崩溃没有新 CrashContext 或 WER 转储，未取得具体 Tick 对象和原生调用栈；命令行自动化未覆盖图形编辑器中组件材质修改后编译的原场景，仍需用此构建复测，不能宣称唯一根因已确定。

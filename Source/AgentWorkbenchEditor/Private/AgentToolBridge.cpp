@@ -76,7 +76,7 @@ TArray<FMCPToolDefinition> MetaDefinitions()
         TEXT("Describe a UE MCP tool by the registry_name returned from catalog search. Returns its input schema; no engine tool is executed."),
         {TEXT("registry_name")}, {TEXT("registry_name")}));
     Definitions.Add(MakeMetaDefinition(CatalogCallName, CatalogCallId,
-        TEXT("Call an approved UE MCP tool by registry_name, using arguments that match its described schema. Every actual call requires explicit user approval."),
+        TEXT("Call a UE MCP tool by registry_name, using arguments that match its described schema. Approval follows the run's selected permission mode."),
         {TEXT("registry_name")}, {TEXT("registry_name"), TEXT("arguments")}));
     return Definitions;
 }

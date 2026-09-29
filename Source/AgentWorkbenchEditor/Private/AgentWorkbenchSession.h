@@ -14,6 +14,7 @@ enum class EAgentRunState : uint8 { Idle, Running, Completed, Cancelled, Failed,
 enum class EAgentRunPhase : uint8 { None, RequestingModel, ProcessingTools };
 enum class EAgentEventType : uint8 { RunStarted, ModelRequestStarted, ModelRequestCompleted, RunCompleted, RunCancelled, ToolCallStarted, ToolCallCompleted, RunFailed };
 enum class EAgentCandidateValidation : uint8 { Unknown, Valid, Missing, Unsupported };
+enum class EAgentApprovalMode : uint8 { Ask, Smart, Unrestricted };
 
 struct FAgentToolCall
 {
@@ -81,6 +82,7 @@ struct FAgentRunInputSnapshot
     FAgentModelOptions ModelOptions;
     FString Provider;
     EAgentWorkbenchProvider ProviderType = EAgentWorkbenchProvider::DeepSeek;
+    EAgentApprovalMode ApprovalMode = EAgentApprovalMode::Ask;
     TArray<FAgentConversationTurn> Conversation;
     TArray<FAgentCandidate> IncludedAssets;
     TArray<FString> AllowedToolNames;
@@ -124,6 +126,7 @@ public:
     FDateTime CreatedAt = FDateTime::UtcNow();
     FDateTime UpdatedAt = CreatedAt;
     FAgentModelOptions ModelOptions;
+    EAgentApprovalMode ApprovalMode = EAgentApprovalMode::Ask;
     FString DraftText;
     TArray<TSharedPtr<FAgentMessage>> Messages;
     TArray<TSharedPtr<FAgentEvent>> Events;
