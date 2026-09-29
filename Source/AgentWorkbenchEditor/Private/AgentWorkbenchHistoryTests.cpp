@@ -1,4 +1,5 @@
 #include "AgentWorkbenchHistory.h"
+#include "AgentWorkbenchDisplayFormatter.h"
 #include "AgentWorkbenchSession.h"
 #include "AssetRegistry/IAssetRegistry.h"
 #include "Dom/JsonObject.h"
@@ -81,6 +82,12 @@ bool FAgentHistoryRoundTripTest::RunTest(const FString& Parameters)
     ToolMessage->ToolCallId = ToolCall.Id;
     ToolMessage->ToolName = ToolCall.Name;
     Original.Messages.Add(ToolMessage);
+    const FString FailureReason = TEXT("模型请求失败：连接超时。");
+    TSharedPtr<FAgentMessage> ErrorMessage = MakeShared<FAgentMessage>();
+    ErrorMessage->Role = EAgentMessageRole::Error;
+    ErrorMessage->RunId = Run.RunId;
+    ErrorMessage->Text = FailureReason;
+    Original.Messages.Add(ErrorMessage);
     Original.AddEvent(EAgentEventType::ToolCallCompleted, Run.RunId, TEXT("assets.search"));
     TestTrue(TEXT("Session JSON saved"), FAgentWorkbenchHistory::Save(Original, Directory));
     const FString BadFile = FPaths::Combine(Directory, FGuid::NewGuid().ToString(EGuidFormats::Digits) + TEXT(".json"));
@@ -106,8 +113,8 @@ bool FAgentHistoryRoundTripTest::RunTest(const FString& Parameters)
                 Restored.Candidates[0]->ValidationStatus, EAgentCandidateValidation::Missing);
         }
         TestEqual(TEXT("Unfinished Run restored as interrupted"), Restored.Runner.State, EAgentRunState::Interrupted);
-        TestEqual(TEXT("Previous messages restored"), Restored.Messages.Num(), 3);
-        if (Restored.Messages.Num() == 3)
+        TestEqual(TEXT("Previous messages restored"), Restored.Messages.Num(), 4);
+        if (Restored.Messages.Num() == 4)
         {
             TestEqual(TEXT("Assistant tool call count restored"), Restored.Messages[1]->ToolCalls.Num(), 1);
             if (Restored.Messages[1]->ToolCalls.Num() == 1)
@@ -119,6 +126,17 @@ bool FAgentHistoryRoundTripTest::RunTest(const FString& Parameters)
             }
             TestEqual(TEXT("Tool result matches call ID"), Restored.Messages[2]->ToolCallId, ToolCall.Id);
             TestEqual(TEXT("Tool result matches call name"), Restored.Messages[2]->ToolName, ToolCall.Name);
+            TestEqual(TEXT("Failure role restored"), Restored.Messages[3]->Role, EAgentMessageRole::Error);
+            TestEqual(TEXT("Failure Run ID restored"), Restored.Messages[3]->RunId, Run.RunId);
+            TestEqual(TEXT("Failure reason restored"), Restored.Messages[3]->Text, FailureReason);
+            const TArray<TSharedPtr<FAgentMessage>> Visible =
+                FAgentWorkbenchDisplayFormatter::VisibleConversationMessages(Restored.Messages);
+            TestEqual(TEXT("Restored conversation shows question and failure"), Visible.Num(), 2);
+            if (Visible.Num() == 2)
+            {
+                TestTrue(TEXT("Restored question is visible first"), Visible[0] == Restored.Messages[0]);
+                TestTrue(TEXT("Restored failure is visible after question"), Visible[1] == Restored.Messages[3]);
+            }
         }
         TestEqual(TEXT("Tool event restored"), Restored.Events.Num(), 1);
         if (Restored.Events.Num() == 1)

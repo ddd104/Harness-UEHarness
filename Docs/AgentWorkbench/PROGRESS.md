@@ -159,3 +159,19 @@
 - 新增纯数据 `AgentWorkbench.Display.ExecutionTreeModel` 与 `ExecutionTreeStatus` 自动化，覆盖多轮及旧版无 Run ID 事件、步骤顺序、问题预览、空详情、历史中断后开启新一轮时的状态、终止状态优先级和 UTF-16 表情符号截断。复核 UE5.8 滚动 API 后，将“是否在底部”的判断改为比例阈值，并在树重建后的下一次布局请求滚动到目标节点，避免回看时跳底及新步骤不可见。
 - 最终 `UEHarnessEditor Win64 DebugGame -NoHotReload` 和 `UEHarnessEditor Win64 Development -NoHotReload` 均完整编译链接通过；DebugGame 命令行 `Automation RunTests AgentWorkbench` 报告 `Saved/Automation/AgentWorkbenchCopyTreeReviewed/index.json`：29/29 通过、无警告。用户关闭图形编辑器后，Development 命令行同套自动化报告 `Saved/Automation/AgentWorkbenchCopyTreeDevelopment/index.json`：29/29 通过、无警告、无失败或未运行项。
 - 用新 Development 二进制重启图形编辑器，确认 Agent Workbench 可打开、历史会话可切换、用户与 Agent 卡片左右分列、执行轮次可展开为步骤。通过系统剪贴板核对了用户消息、Agent 回复和执行步骤的整条复制按钮；验收后已关闭编辑器。旧历史按现有 `bPersistDetailedPayloads=false` 设置未保存详情正文，因此本次未手工验证详情节点与选中文字复制。
+
+## 2026-09-29 任务失败原因显示在对话区
+
+- `FailRun` 已保存失败原因并产生 `RunFailed` 执行事件；本次修正对话筛选，使该轮 `Error` 消息随用户问题显示。失败原因使用靠左的“任务失败”卡片和错误色标签，可选择或整条复制；空原因的旧记录显示通用提示。取消和工具中间结果仍不作为失败回复显示，发送前校验错误仍在输入框下方提示。
+- 扩展对话筛选和历史往返自动化，验证失败原因在对应问题后显示，以及保存、恢复后仍可见。`UEHarnessEditor Win64 DebugGame -NoHotReload` 完整编译链接成功；`Automation RunTests AgentWorkbench` 报告 `Saved/Automation/AgentWorkbenchFailureConversation/index.json`：29/29 通过、无警告。Development 源码编译通过，但最终 DLL 链接被当前 Rider 调试的 `UnrealEditor.exe` 占用，尚待编辑器退出后重试。`git diff --check` 通过；本次图形界面手工验收未执行。
+
+## 2026-09-29 执行树卡片点击与历史详情
+
+- 隐藏树行自带的展开三角，点击轮次卡片切换步骤，点击步骤卡片切换详情；轮次、步骤保留整条复制按钮，详情正文保留选择和复制。历史事件未保存正文时，按轮次、顺序与工具名从已有消息恢复可可靠关联的工具参数和结果；无法恢复的模型输入明确提示。
+- Development Editor Target 完整编译链接成功；`Automation RunTests AgentWorkbench` 报告 `Saved/Automation/AgentWorkbenchClickableTree/index.json`：30/30 成功、无警告。图形界面实际点击与历史详情展开未完成验收。
+
+## 2026-09-29 执行树连续点击、悬停与滚动宽度
+
+- UE5.8 的 `STableRow` 会在第二次快速点击时先自动切换展开状态，随后卡片的鼠标松开回调再切换一次。执行树现已接管双击，保证卡片每次点击只切换一次。轮次及步骤卡片通过鼠标进入、离开事件高亮和恢复；使用固定 16 像素的外置滚动条槽，列表在滚动条出现时保持宽度。
+- 最新代码的 DebugGame Editor Target 完整编译链接通过；Development Editor Target 使用 `-NoLink -NoHotReload` 源码编译通过。双击及滚动条改动后执行 `Automation RunTests AgentWorkbench`，报告 `Saved/Automation/AgentWorkbenchExecutionTreeInteraction/index.json`：30/30 成功、0 失败，另有 1 条无关的引擎联网探测超时警告。随后把悬停检测限定到卡片本身，重新完成 DebugGame 链接及 Development 源码编译；该阶段自动化没有重复运行，因为原测试不覆盖鼠标悬停。
+- 用户保存并关闭原 Development 编辑器后，最新 Development Editor Target 完整编译链接通过；其命令行自动化报告 `Saved/Automation/AgentWorkbenchExecutionTreeInteractionDevelopment/index.json`：30/30 成功、无警告。使用新 Development 二进制在图形编辑器打开旧历史，实际验证轮次和步骤连续点击两次后回到原展开状态、鼠标悬停高亮且移出恢复、旧记录可展开查看工具调用参数，以及滚动条出现和消失时卡片右边界保持不变。验收后已关闭本次启动的工作台和编辑器。

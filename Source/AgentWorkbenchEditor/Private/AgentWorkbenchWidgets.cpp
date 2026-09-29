@@ -20,12 +20,12 @@
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SSplitter.h"
 #include "Widgets/Layout/SScrollBox.h"
+#include "Widgets/Layout/SScrollBar.h"
 #include "Widgets/Layout/SSpacer.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/Text/SMultiLineEditableText.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Text/SInlineEditableTextBlock.h"
-#include "Widgets/Views/SExpanderArrow.h"
 #include "Widgets/Views/STableRow.h"
 
 #define LOCTEXT_NAMESPACE "AgentWorkbench"
@@ -33,6 +33,21 @@
 namespace
 {
 const FSlateRoundedBoxBrush AgentCardBrush(FLinearColor::White, 6.f);
+
+void HighlightExecutionCardOnHover(const TSharedRef<SBorder>& Card, const FSlateColor NormalColor)
+{
+    const TWeakPtr<SBorder> WeakCard = Card;
+    Card->SetOnMouseEnter(FNoReplyPointerEventHandler::CreateLambda([WeakCard](const FGeometry&, const FPointerEvent&)
+    {
+        if (const TSharedPtr<SBorder> HoverCard = WeakCard.Pin())
+        { HoverCard->SetBorderBackgroundColor(TAttribute<FSlateColor>(FStyleColors::Hover)); }
+    }));
+    Card->SetOnMouseLeave(FSimpleNoReplyPointerEventHandler::CreateLambda([WeakCard, NormalColor](const FPointerEvent&)
+    {
+        if (const TSharedPtr<SBorder> HoverCard = WeakCard.Pin())
+        { HoverCard->SetBorderBackgroundColor(TAttribute<FSlateColor>(NormalColor)); }
+    }));
+}
 }
 
 void SAgentHistoryPanel::Construct(const FArguments& Args, TSharedRef<FAgentSessionManager> InManager, const FGuid& InCurrentSessionId)
@@ -256,7 +271,9 @@ void SAgentConversationList::ScrollToLatest()
 TSharedRef<ITableRow> SAgentConversationList::MakeRow(TSharedPtr<FAgentMessage> Item, const TSharedRef<STableViewBase>& Owner)
 {
     const bool bUser = Item->Role == EAgentMessageRole::User;
-    const FString Text = Item->Text;
+    const bool bFailure = Item->Role == EAgentMessageRole::Error;
+    const FString Text = bFailure && Item->Text.TrimStartAndEnd().IsEmpty()
+        ? TEXT("任务执行失败，未提供具体原因。") : Item->Text;
     TSharedRef<SHorizontalBox> Aligned = SNew(SHorizontalBox);
     if (bUser) { Aligned->AddSlot().FillWidth(1) [ SNew(SSpacer) ]; }
     Aligned->AddSlot().FillWidth(4) [ SNew(SBorder)
@@ -265,8 +282,11 @@ TSharedRef<ITableRow> SAgentConversationList::MakeRow(TSharedPtr<FAgentMessage> 
         .Padding(10) [ SNew(SVerticalBox)
             + SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 5) [ SNew(SHorizontalBox)
                 + SHorizontalBox::Slot().FillWidth(1).VAlign(VAlign_Center) [ SNew(STextBlock)
-                    .Text(bUser ? LOCTEXT("UserMessageLabel", "我") : LOCTEXT("AgentMessageLabel", "Agent"))
-                    .ColorAndOpacity(bUser ? FStyleColors::AccentBlue : FStyleColors::Foreground) ]
+                    .Text(bUser ? LOCTEXT("UserMessageLabel", "我")
+                        : bFailure ? LOCTEXT("FailureMessageLabel", "任务失败")
+                        : LOCTEXT("AgentMessageLabel", "Agent"))
+                    .ColorAndOpacity(bUser ? FStyleColors::AccentBlue
+                        : bFailure ? FStyleColors::Error : FStyleColors::Foreground) ]
                 + SHorizontalBox::Slot().AutoWidth() [ SNew(SButton)
                     .Text(LOCTEXT("CopyConversationMessage", "复制"))
                     .ToolTipText(LOCTEXT("CopyConversationMessageHint", "复制整条消息"))
@@ -375,6 +395,10 @@ void SAgentExecutionPanel::Construct(const FArguments& Args, TSharedRef<FAgentSe
     for (const TSharedPtr<FAgentExecutionNode>& Root : Roots)
     { if (Root) { KnownRunKeys.Add(NodeKey(*Root)); } }
     if (!Roots.IsEmpty() && Roots.Last()) { ExpandedNodeKeys.Add(NodeKey(*Roots.Last())); }
+    // Keep the list width stable as details make the vertical scrollbar necessary.
+    TSharedRef<SScrollBar> ExecutionScrollBar = SNew(SScrollBar)
+        .Orientation(Orient_Vertical)
+        .ScrollbarDisabledVisibility(EVisibility::Hidden);
     ChildSlot [ SNew(SBorder).Padding(8) [ SNew(SVerticalBox)
         + SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 6) [ SNew(SHorizontalBox)
             + SHorizontalBox::Slot().FillWidth(1).VAlign(VAlign_Center)
@@ -383,11 +407,16 @@ void SAgentExecutionPanel::Construct(const FArguments& Args, TSharedRef<FAgentSe
                 .Text(LOCTEXT("ExecutionLatest", "最新"))
                 .OnClicked_Lambda([this]()
                 { ScrollToLatest(); return FReply::Handled(); }) ] ]
-        + SVerticalBox::Slot().FillHeight(1) [ SAssignNew(Tree, STreeView<TSharedPtr<FAgentExecutionNode>>)
-            .TreeItemsSource(&Roots).OnGenerateRow(this, &SAgentExecutionPanel::MakeRow)
-            .OnGetChildren(this, &SAgentExecutionPanel::GetNodeChildren)
-            .OnExpansionChanged(this, &SAgentExecutionPanel::OnExpansionChanged)
-            .SelectionMode(ESelectionMode::None) ]
+        + SVerticalBox::Slot().FillHeight(1) [ SNew(SHorizontalBox)
+            + SHorizontalBox::Slot().FillWidth(1) [ SAssignNew(Tree, STreeView<TSharedPtr<FAgentExecutionNode>>)
+                .TreeItemsSource(&Roots).OnGenerateRow(this, &SAgentExecutionPanel::MakeRow)
+                .OnGetChildren(this, &SAgentExecutionPanel::GetNodeChildren)
+                .OnExpansionChanged(this, &SAgentExecutionPanel::OnExpansionChanged)
+                // STableRow otherwise toggles expansion on double-click before the card's mouse-up.
+                .OnMouseButtonDoubleClick_Lambda([](TSharedPtr<FAgentExecutionNode>) {})
+                .ExternalScrollbar(ExecutionScrollBar)
+                .SelectionMode(ESelectionMode::None) ]
+            + SHorizontalBox::Slot().AutoWidth() [ SNew(SBox).WidthOverride(16.f) [ ExecutionScrollBar ] ] ]
     ] ];
     if (!Roots.IsEmpty() && Roots.Last()) { Tree->SetItemExpansion(Roots.Last(), true); }
 }
@@ -467,16 +496,20 @@ TSharedRef<ITableRow> SAgentExecutionPanel::MakeRow(TSharedPtr<FAgentExecutionNo
 {
     TSharedRef<STableRow<TSharedPtr<FAgentExecutionNode>>> Row =
         SNew(STableRow<TSharedPtr<FAgentExecutionNode>>, Owner).Padding(FMargin(2, 4));
+    // STreeView adds its own expander arrow; the card itself now controls expansion.
+    Row->SetExpanderArrowVisibility(EVisibility::Collapsed);
     if (Item->Kind == EAgentExecutionNodeKind::Detail)
     {
-        const FString Detail = Item->Event
-            ? FAgentWorkbenchDisplayFormatter::FormatEventDetail(*Item->Event) : FString();
-        Row->SetContent(SNew(SHorizontalBox)
-            + SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Top)
-                [ SNew(SExpanderArrow, Row).ShouldDrawWires(true) ]
-            + SHorizontalBox::Slot().FillWidth(1) [ SNew(SBorder)
+        FString Detail = Item->DisplayDetail;
+        if (Item->Event)
+        {
+            FAgentEvent DisplayEvent = *Item->Event;
+            DisplayEvent.Detail = Item->DisplayDetail;
+            Detail = FAgentWorkbenchDisplayFormatter::FormatEventDetail(DisplayEvent);
+        }
+        Row->SetContent(SNew(SBox).Padding(FMargin(28, 0, 0, 0)) [ SNew(SBorder)
                 .BorderImage(&AgentCardBrush)
-                .BorderBackgroundColor(FStyleColors::Recessed).Padding(8)
+                .BorderBackgroundColor(FStyleColors::Header).Padding(10)
                 [ SNew(SVerticalBox)
                     + SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right)
                         [ SNew(SButton).Text(LOCTEXT("CopyExecutionDetail", "复制详情"))
@@ -508,33 +541,61 @@ TSharedRef<ITableRow> SAgentExecutionPanel::MakeRow(TSharedPtr<FAgentExecutionNo
         default: break;
         }
         const FString Title = Item->Title;
-        Row->SetContent(SNew(SBorder)
+        TSharedPtr<SBorder> RunCard;
+        Row->SetContent(SAssignNew(RunCard, SBorder)
             .BorderImage(&AgentCardBrush)
             .BorderBackgroundColor(FStyleColors::Panel).Padding(FMargin(6, 8))
+            .ToolTipText(LOCTEXT("ToggleExecutionRunHint", "点击查看或收起本轮执行步骤"))
+            .OnMouseButtonUp_Lambda([this, Item](const FGeometry&, const FPointerEvent& MouseEvent)
+            {
+                if (MouseEvent.GetEffectingButton() != EKeys::LeftMouseButton || !Tree
+                    || Item->Children.IsEmpty()) { return FReply::Unhandled(); }
+                Tree->SetItemExpansion(Item, !Tree->IsItemExpanded(Item));
+                return FReply::Handled();
+            })
             [ SNew(SHorizontalBox)
-                + SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
-                    [ SNew(SExpanderArrow, Row).ShouldDrawWires(true) ]
                 + SHorizontalBox::Slot().FillWidth(1).VAlign(VAlign_Center)
-                    [ SNew(SMultiLineEditableText).Text(FText::FromString(Title))
-                        .IsReadOnly(true).AutoWrapText(true).AllowContextMenu(true) ]
+                    [ SNew(STextBlock).Text(FText::FromString(Title)).AutoWrapText(true) ]
                 + SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(5, 0)
-                    [ SNew(STextBlock).Text(FText::FromString(Status)).ColorAndOpacity(StatusColor) ] ]);
+                    [ SNew(STextBlock).Text(FText::FromString(Status)).ColorAndOpacity(StatusColor) ]
+                + SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(5, 0, 0, 0)
+                    [ SNew(SButton).Text(LOCTEXT("CopyExecutionRun", "复制"))
+                        .ToolTipText(LOCTEXT("CopyExecutionRunHint", "复制本轮标题"))
+                        .OnClicked_Lambda([Title]()
+                        { FPlatformApplicationMisc::ClipboardCopy(*Title); return FReply::Handled(); }) ] ]);
+        HighlightExecutionCardOnHover(RunCard.ToSharedRef(), FStyleColors::Panel);
         return Row;
     }
     const FString Summary = Item->Title;
-    Row->SetContent(SNew(SBorder)
+    TSharedPtr<SBorder> StepCard;
+    Row->SetContent(SNew(SBox).Padding(FMargin(14, 0, 0, 0)) [ SAssignNew(StepCard, SBorder)
         .BorderImage(&AgentCardBrush)
         .BorderBackgroundColor(FStyleColors::Recessed).Padding(FMargin(5, 6))
+        .ToolTipText(Item->Children.IsEmpty()
+            ? FText::GetEmpty() : LOCTEXT("ToggleExecutionStepHint", "点击查看或收起步骤详情"))
+        .OnMouseButtonUp_Lambda([this, Item](const FGeometry&, const FPointerEvent& MouseEvent)
+        {
+            if (MouseEvent.GetEffectingButton() != EKeys::LeftMouseButton || !Tree
+                || Item->Children.IsEmpty()) { return FReply::Unhandled(); }
+            Tree->SetItemExpansion(Item, !Tree->IsItemExpanded(Item));
+            return FReply::Handled();
+        })
         [ SNew(SHorizontalBox)
-            + SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
-                [ SNew(SExpanderArrow, Row).ShouldDrawWires(true) ]
             + SHorizontalBox::Slot().FillWidth(1).VAlign(VAlign_Center)
-                [ SNew(SMultiLineEditableText).Text(FText::FromString(Summary))
-                    .IsReadOnly(true).AutoWrapText(true).AllowContextMenu(true) ]
+                [ SNew(STextBlock).Text(FText::FromString(Summary)).AutoWrapText(true) ]
+            + SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(4, 0)
+                [ SNew(STextBlock)
+                    .Visibility(Item->Children.IsEmpty() ? EVisibility::Collapsed : EVisibility::Visible)
+                    .Text_Lambda([this, Item]()
+                    { return Tree && Tree->IsItemExpanded(Item)
+                        ? LOCTEXT("HideExecutionDetail", "收起详情")
+                        : LOCTEXT("ShowExecutionDetail", "查看详情"); })
+                    .ColorAndOpacity(FStyleColors::Secondary) ]
             + SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
                 [ SNew(SButton).Text(LOCTEXT("CopyExecutionStep", "复制"))
                     .OnClicked_Lambda([Summary]()
-                    { FPlatformApplicationMisc::ClipboardCopy(*Summary); return FReply::Handled(); }) ] ]);
+                    { FPlatformApplicationMisc::ClipboardCopy(*Summary); return FReply::Handled(); }) ] ] ]);
+    HighlightExecutionCardOnHover(StepCard.ToSharedRef(), FStyleColors::Recessed);
     return Row;
 }
 

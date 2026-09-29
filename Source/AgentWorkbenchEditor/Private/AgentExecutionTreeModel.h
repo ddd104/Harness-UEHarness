@@ -28,6 +28,7 @@ struct FAgentExecutionNode
     FGuid RunId;
     int32 Sequence = 0;
     FString Title;
+    FString DisplayDetail;
     TSharedPtr<FAgentEvent> Event;
     TArray<TSharedPtr<FAgentExecutionNode>> Children;
 };

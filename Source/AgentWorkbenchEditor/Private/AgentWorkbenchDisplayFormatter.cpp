@@ -5,6 +5,7 @@
 #include "Dom/JsonValue.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonWriter.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 #include "Misc/AutomationTest.h"
@@ -16,6 +17,88 @@ constexpr int32 MaxDisplayChars = 32768;
 constexpr int32 MaxParseChars = 524288;
 constexpr int32 MaxJsonDepth = 12;
 constexpr TCHAR TruncationNotice[] = TEXT("\n…（内容过长，已截断）");
+
+FString DecodeEscapedDisplayText(const FString& Text)
+{
+    // A clipped tool preview is no longer valid JSON, but can still contain one
+    // JSON-escaped layer of line breaks and indentation. Decode that layer only
+    // when it looks like formatted text, so ordinary paths stay untouched.
+    const FString Trimmed = Text.TrimStartAndEnd();
+    const bool bJsonFragment = Trimmed.StartsWith(TEXT("{")) || Trimmed.StartsWith(TEXT("["));
+    if (!Text.Contains(TEXT("\\r\\n")) && !Text.Contains(TEXT("\\n\\t"))
+        && !(bJsonFragment && Text.Contains(TEXT("\\n")) && Text.Contains(TEXT("\\\""))))
+    { return Text; }
+
+    FString Decoded;
+    Decoded.Reserve(Text.Len());
+    auto IsWindowsPathAt = [&Text](int32 Index)
+    {
+        int32 OpeningQuote = Index - 1;
+        while (OpeningQuote >= 0 && Text[OpeningQuote] != TEXT('"')) { --OpeningQuote; }
+        const int32 Start = OpeningQuote + 1;
+        return Start + 1 < Index && FChar::IsAlpha(Text[Start])
+            && Text[Start + 1] == TEXT(':')
+            && !Text.Mid(Start, Index - Start).Contains(TEXT(" "));
+    };
+    for (int32 Index = 0; Index < Text.Len(); ++Index)
+    {
+        if (Text[Index] != TEXT('\\') || Index + 1 >= Text.Len())
+        {
+            Decoded.AppendChar(Text[Index]);
+            continue;
+        }
+        // A clipped JSON preview can contain a serialized JSON string inside
+        // another serialized string. Its line breaks then have two slashes.
+        if (bJsonFragment && Index + 2 < Text.Len()
+            && Text[Index + 1] == TEXT('\\') && !IsWindowsPathAt(Index))
+        {
+            const TCHAR NestedEscape = Text[Index + 2];
+            if (NestedEscape == TEXT('r') && Index + 5 < Text.Len()
+                && Text[Index + 3] == TEXT('\\') && Text[Index + 4] == TEXT('\\')
+                && Text[Index + 5] == TEXT('n'))
+            {
+                Decoded.AppendChar(TEXT('\n'));
+                Index += 5;
+                continue;
+            }
+            if (NestedEscape == TEXT('r') || NestedEscape == TEXT('n')
+                || NestedEscape == TEXT('t'))
+            {
+                if (NestedEscape == TEXT('t')) { Decoded += TEXT("    "); }
+                else { Decoded.AppendChar(TEXT('\n')); }
+                Index += 2;
+                continue;
+            }
+        }
+        const TCHAR Escape = Text[Index + 1];
+        if (Escape == TEXT('r') && Index + 3 < Text.Len()
+            && Text[Index + 2] == TEXT('\\') && Text[Index + 3] == TEXT('n'))
+        {
+            Decoded.AppendChar(TEXT('\n'));
+            Index += 3;
+        }
+        else if (Escape == TEXT('r') || Escape == TEXT('n'))
+        {
+            Decoded.AppendChar(TEXT('\n'));
+            ++Index;
+        }
+        else if (Escape == TEXT('t'))
+        {
+            Decoded += TEXT("    ");
+            ++Index;
+        }
+        else if (Escape == TEXT('\\') || Escape == TEXT('"') || Escape == TEXT('/'))
+        {
+            Decoded.AppendChar(Escape);
+            ++Index;
+        }
+        else
+        {
+            Decoded.AppendChar(Text[Index]);
+        }
+    }
+    return Decoded;
+}
 
 class FDisplayWriter
 {
@@ -43,12 +126,11 @@ public:
 
     void AppendIndentedText(const FString& Text, int32 Depth)
     {
-        // JSON decoding has already converted escapes to characters. Keep literal
-        // backslashes, including those used in source and Windows paths, intact.
         const FString ContinuationIndent = FString::ChrN(FMath::Max(0, Depth) * 2, TEXT(' '));
-        FString WithIndent = Text.Left(MaxDisplayChars);
+        FString WithIndent = DecodeEscapedDisplayText(Text);
         WithIndent.ReplaceInline(TEXT("\r\n"), TEXT("\n"));
         WithIndent.ReplaceInline(TEXT("\r"), TEXT("\n"));
+        WithIndent.ReplaceInline(TEXT("\t"), TEXT("    "));
         WithIndent.ReplaceInline(TEXT("\n"), *(FString(TEXT("\n")) + ContinuationIndent));
         Append(WithIndent);
     }
@@ -189,7 +271,7 @@ FString FAgentWorkbenchDisplayFormatter::FormatEventDetail(const FAgentEvent& Ev
     }
     else
     {
-        Writer.Append(Event.Detail);
+        Writer.AppendIndentedText(Event.Detail, 0);
     }
     return Writer.Finish();
 }
@@ -217,7 +299,8 @@ TArray<TSharedPtr<FAgentMessage>> FAgentWorkbenchDisplayFormatter::VisibleConver
         const bool bLegacyAssistant = Message->Role == EAgentMessageRole::Assistant
             && !Message->RunId.IsValid() && Message->ToolCalls.IsEmpty()
             && !Message->Text.TrimStartAndEnd().IsEmpty();
-        if (Message->Role == EAgentMessageRole::User || bLegacyAssistant
+        if (Message->Role == EAgentMessageRole::User || Message->Role == EAgentMessageRole::Error
+            || bLegacyAssistant
             || (Message->Role == EAgentMessageRole::Assistant && LastIndex && *LastIndex == Index))
         {
             Visible.Add(Message);
@@ -239,7 +322,7 @@ bool FAgentWorkbenchDisplayFormatterTest::RunTest(const FString& Parameters)
     const FString RequestDisplay = FAgentWorkbenchDisplayFormatter::FormatEventDetail(Request);
     TestTrue(TEXT("Request is labeled"), RequestDisplay.Contains(TEXT("模型调用输入")));
     TestTrue(TEXT("JSON newline decoded"), RequestDisplay.Contains(TEXT("first\n  second")));
-    TestTrue(TEXT("JSON tab decoded"), RequestDisplay.Contains(TEXT("second\tcolumn")));
+    TestTrue(TEXT("JSON tab shown as spaces"), RequestDisplay.Contains(TEXT("second    column")));
     TestTrue(TEXT("JSON slash decoded"), RequestDisplay.Contains(TEXT("https://example.com/a")));
     TestFalse(TEXT("No newline escape remains"), RequestDisplay.Contains(TEXT("\\n")));
     TestFalse(TEXT("No tab escape remains"), RequestDisplay.Contains(TEXT("\\t")));
@@ -250,9 +333,50 @@ bool FAgentWorkbenchDisplayFormatterTest::RunTest(const FString& Parameters)
     ToolResult.Detail = TEXT(R"({"result":"{\"summary\":\"line 1\\nline 2\\tend\",\"path\":\"C:\\\\Temp\\\\file.txt\"}"})");
     const FString ToolDisplay = FAgentWorkbenchDisplayFormatter::FormatEventDetail(ToolResult);
     TestTrue(TEXT("Nested JSON newline decoded"), ToolDisplay.Contains(TEXT("line 1\n    line 2")));
-    TestTrue(TEXT("Nested JSON tab decoded"), ToolDisplay.Contains(TEXT("line 2\tend")));
+    TestTrue(TEXT("Nested JSON tab shown as spaces"), ToolDisplay.Contains(TEXT("line 2    end")));
     TestTrue(TEXT("Windows path preserved"), ToolDisplay.Contains(TEXT("C:\\Temp\\file.txt")));
     TestFalse(TEXT("Nested newline escape decoded"), ToolDisplay.Contains(TEXT("\\n")));
+
+    TSharedRef<FJsonObject> ClippedResult = MakeShared<FJsonObject>();
+    ClippedResult->SetBoolField(TEXT("truncated"), true);
+    ClippedResult->SetStringField(TEXT("preview"),
+        TEXT("{\r\n\t\"text\": \"{\\r\\n\\t\\\"items\\\": []}\", \"path\": \"C:\\\\Temp\\\\file.txt\""));
+    FAgentEvent ClippedEvent;
+    ClippedEvent.Type = EAgentEventType::ToolCallCompleted;
+    FJsonSerializer::Serialize(ClippedResult, TJsonWriterFactory<>::Create(&ClippedEvent.Detail));
+    const FString ClippedDisplay = FAgentWorkbenchDisplayFormatter::FormatEventDetail(ClippedEvent);
+    TestFalse(TEXT("Clipped preview has no raw CRLF escape"),
+        ClippedDisplay.Contains(TEXT("\\r\\n"), ESearchCase::CaseSensitive));
+    TestFalse(TEXT("Clipped preview has no raw tab escape"),
+        ClippedDisplay.Contains(TEXT("\\t"), ESearchCase::CaseSensitive));
+    TestTrue(TEXT("Clipped preview has readable lines"), ClippedDisplay.Contains(TEXT("\n      \"items\"")));
+    TestTrue(TEXT("Clipped preview keeps Windows path"), ClippedDisplay.Contains(TEXT("C:\\Temp\\file.txt")));
+
+    TSharedRef<FJsonObject> NestedClippedResult = MakeShared<FJsonObject>();
+    NestedClippedResult->SetBoolField(TEXT("truncated"), true);
+    NestedClippedResult->SetStringField(TEXT("preview"),
+        TEXT("{\\r\\n\\t\\\"description\\\": \\\"first\\\\n\\\\nsecond\\\\tcolumn\\\", "
+            "\\\"path\\\": \\\"C:\\\\name\\\""));
+    FAgentEvent NestedClippedEvent;
+    NestedClippedEvent.Type = EAgentEventType::ToolCallCompleted;
+    FJsonSerializer::Serialize(NestedClippedResult,
+        TJsonWriterFactory<>::Create(&NestedClippedEvent.Detail));
+    const FString NestedClippedDisplay = FAgentWorkbenchDisplayFormatter::FormatEventDetail(NestedClippedEvent);
+    TestFalse(TEXT("Nested clipped preview has no escaped newline"),
+        NestedClippedDisplay.Contains(TEXT("\\\\n"), ESearchCase::CaseSensitive));
+    TestFalse(TEXT("Nested clipped preview has no escaped tab"),
+        NestedClippedDisplay.Contains(TEXT("\\\\t"), ESearchCase::CaseSensitive));
+    TestTrue(TEXT("Nested clipped preview description wraps"),
+        NestedClippedDisplay.Contains(TEXT("first\n"))
+        && NestedClippedDisplay.Contains(TEXT("second    column")));
+    TestTrue(TEXT("Nested clipped preview path survives"),
+        NestedClippedDisplay.Contains(TEXT("C:\\name")));
+
+    FAgentEvent EscapedPlain;
+    EscapedPlain.Type = EAgentEventType::ToolCallCompleted;
+    EscapedPlain.Detail = TEXT("first\\r\\n\\tsecond");
+    TestTrue(TEXT("Plain tool result layout decoded"),
+        FAgentWorkbenchDisplayFormatter::FormatEventDetail(EscapedPlain).Contains(TEXT("first\n    second")));
 
     FAgentEvent EmptyContainers;
     EmptyContainers.Type = EAgentEventType::ToolCallStarted;
@@ -309,13 +433,15 @@ bool FAgentWorkbenchVisibleConversationTest::RunTest(const FString& Parameters)
     AddMessage(EAgentMessageRole::Assistant, FGuid(), TEXT("legacy final"));
     const TArray<TSharedPtr<FAgentMessage>> Visible =
         FAgentWorkbenchDisplayFormatter::VisibleConversationMessages(Messages);
-    TestEqual(TEXT("Users, final answer, and legacy answer are visible"), Visible.Num(), 4);
-    if (Visible.Num() == 4)
+    TestEqual(TEXT("Users, final answer, failure reason, and legacy answer are visible"), Visible.Num(), 5);
+    if (Visible.Num() == 5)
     {
         TestTrue(TEXT("First entry is user"), Visible[0] == Messages[0]);
         TestTrue(TEXT("Second entry is user without final answer"), Visible[1] == Messages[4]);
-        TestTrue(TEXT("Last eligible assistant wins"), Visible[2] == Messages[7]);
-        TestTrue(TEXT("Legacy assistant is visible"), Visible[3] == Messages[8]);
+        TestTrue(TEXT("Failure reason follows its user question"), Visible[2] == Messages[6]);
+        TestEqual(TEXT("Failure reason is unchanged"), Visible[2]->Text, FString(TEXT("error")));
+        TestTrue(TEXT("Last eligible assistant wins"), Visible[3] == Messages[7]);
+        TestTrue(TEXT("Legacy assistant is visible"), Visible[4] == Messages[8]);
     }
     TestEqual(TEXT("Stored messages unchanged"), Messages.Num(), 9);
     return true;

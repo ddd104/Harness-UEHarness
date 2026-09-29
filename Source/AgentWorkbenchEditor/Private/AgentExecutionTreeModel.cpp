@@ -10,6 +10,31 @@ namespace
 {
 constexpr int32 MaxQuestionPreviewChars = 45;
 
+struct FHistoricalToolPayload
+{
+    FString ToolName;
+    const FString* Text = nullptr;
+};
+
+struct FHistoricalToolPayloads
+{
+    TArray<FHistoricalToolPayload> CallArguments;
+    TArray<FHistoricalToolPayload> Results;
+    int32 CallEvents = 0;
+    int32 ResultEvents = 0;
+    int32 NextCall = 0;
+    int32 NextResult = 0;
+};
+
+bool MatchesToolName(const FAgentEvent& Event, const FString& ToolName)
+{
+    if (ToolName.IsEmpty()) { return false; }
+    const FString Summary = Event.Summary.TrimStartAndEnd();
+    const FString Prefix = Event.Type == EAgentEventType::ToolCallStarted
+        ? TEXT("调用工具：") : TEXT("工具返回：");
+    return Summary == ToolName || Summary == Prefix + ToolName;
+}
+
 FString QuestionPreview(const FString& Input)
 {
     FString Normalized;
@@ -69,6 +94,38 @@ TArray<TSharedPtr<FAgentExecutionNode>> FAgentExecutionTreeModel::Build(const FA
 {
     TArray<TSharedPtr<FAgentExecutionNode>> Roots;
     TMap<FGuid, TSharedPtr<FAgentExecutionNode>> Runs;
+    TMap<FGuid, FHistoricalToolPayloads> ToolPayloads;
+    for (const TSharedPtr<FAgentMessage>& Message : Session.Messages)
+    {
+        // Legacy events without a Run ID cannot be paired safely with a message.
+        if (!Message || !Message->RunId.IsValid()) { continue; }
+        if (Message->Role == EAgentMessageRole::Assistant && !Message->ToolCalls.IsEmpty())
+        {
+            FHistoricalToolPayloads& Payloads = ToolPayloads.FindOrAdd(Message->RunId);
+            for (const FAgentToolCall& Call : Message->ToolCalls)
+            {
+                FHistoricalToolPayload Item;
+                Item.ToolName = Call.Name;
+                Item.Text = &Call.ArgumentsJson;
+                Payloads.CallArguments.Add(MoveTemp(Item));
+            }
+        }
+        else if (Message->Role == EAgentMessageRole::Tool)
+        {
+            FHistoricalToolPayload Item;
+            Item.ToolName = Message->ToolName;
+            Item.Text = &Message->Text;
+            ToolPayloads.FindOrAdd(Message->RunId).Results.Add(MoveTemp(Item));
+        }
+    }
+    for (const TSharedPtr<FAgentEvent>& Event : Session.Events)
+    {
+        if (!Event || !Event->RunId.IsValid()) { continue; }
+        if (Event->Type == EAgentEventType::ToolCallStarted)
+        { ++ToolPayloads.FindOrAdd(Event->RunId).CallEvents; }
+        else if (Event->Type == EAgentEventType::ToolCallCompleted)
+        { ++ToolPayloads.FindOrAdd(Event->RunId).ResultEvents; }
+    }
     int32 RunNumber = 0;
     for (const TSharedPtr<FAgentEvent>& Event : Session.Events)
     {
@@ -99,13 +156,45 @@ TArray<TSharedPtr<FAgentExecutionNode>> FAgentExecutionTreeModel::Build(const FA
         Step->Sequence = Event->Sequence;
         Step->Title = Event->Summary;
         Step->Event = Event;
-        if (!Event->Detail.IsEmpty())
+        FString DisplayDetail = Event->Detail;
+        if (Event->RunId.IsValid()
+            && (Event->Type == EAgentEventType::ToolCallStarted
+                || Event->Type == EAgentEventType::ToolCallCompleted))
+        {
+            FHistoricalToolPayloads& Payloads = ToolPayloads.FindChecked(Event->RunId);
+            const bool bCall = Event->Type == EAgentEventType::ToolCallStarted;
+            const TArray<FHistoricalToolPayload>& Items = bCall
+                ? Payloads.CallArguments : Payloads.Results;
+            int32& Next = bCall ? Payloads.NextCall : Payloads.NextResult;
+            const int32 EventCount = bCall ? Payloads.CallEvents : Payloads.ResultEvents;
+            // A missing event makes same-name calls ambiguous. Preserve original
+            // detail, but do not infer a replacement from an incomplete sequence.
+            if (EventCount == Items.Num() && Items.IsValidIndex(Next))
+            {
+                const FHistoricalToolPayload& Item = Items[Next++];
+                if (MatchesToolName(*Event, Item.ToolName))
+                {
+                    if (DisplayDetail.IsEmpty() && Item.Text && !Item.Text->IsEmpty())
+                    { DisplayDetail = *Item.Text; }
+                }
+                else if (DisplayDetail.IsEmpty())
+                { DisplayDetail = TEXT("历史详情无法可靠关联。"); }
+            }
+            else if (DisplayDetail.IsEmpty())
+            {
+                DisplayDetail = TEXT("历史详情无法可靠关联。");
+            }
+        }
+        if (DisplayDetail.IsEmpty() && Event->Type == EAgentEventType::ModelRequestStarted)
+        { DisplayDetail = TEXT("详情未保存，无法还原完整模型调用输入。"); }
+        if (!DisplayDetail.IsEmpty())
         {
             TSharedPtr<FAgentExecutionNode> Detail = MakeShared<FAgentExecutionNode>();
             Detail->Kind = EAgentExecutionNodeKind::Detail;
             Detail->RunId = Event->RunId;
             Detail->Sequence = Event->Sequence;
             Detail->Title = TEXT("详情");
+            Detail->DisplayDetail = MoveTemp(DisplayDetail);
             Detail->Event = Event;
             Step->Children.Add(Detail);
         }
@@ -214,10 +303,176 @@ bool FAgentExecutionTreeModelTest::RunTest(const FString& Parameters)
         const TSharedPtr<FAgentExecutionNode>& Detail = Roots[0]->Children[1]->Children[0];
         TestEqual(TEXT("Detail node has its own kind"), Detail->Kind, EAgentExecutionNodeKind::Detail);
         TestTrue(TEXT("Detail references the original event"), Detail->Event == FirstTool);
+        TestEqual(TEXT("Original detail is available to the view"), Detail->DisplayDetail, FString(TEXT("{}")));
         TestEqual(TEXT("Detail text is not copied into the tree"), FirstTool->Detail, FString(TEXT("{}")));
     }
     TestTrue(TEXT("Legacy step keeps its event"), Roots[1]->Children[0]->Event == LegacyStep);
     TestEqual(TEXT("Source events remain unchanged"), Session.Events.Num(), 6);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAgentExecutionTreeHistoricalDetailsTest,
+    "AgentWorkbench.Display.ExecutionTreeHistoricalDetails",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAgentExecutionTreeHistoricalDetailsTest::RunTest(const FString& Parameters)
+{
+    FAgentSession Session;
+    const FGuid FirstRun = FGuid::NewGuid();
+    const FGuid SecondRun = FGuid::NewGuid();
+    const FString ToolName = TEXT("assets.search");
+
+    auto AddProposal = [&Session, &ToolName](const FGuid& RunId,
+        const TArray<FString>& Arguments)
+    {
+        TSharedPtr<FAgentMessage> Message = MakeShared<FAgentMessage>();
+        Message->Role = EAgentMessageRole::Assistant;
+        Message->RunId = RunId;
+        for (const FString& Json : Arguments)
+        {
+            FAgentToolCall Call;
+            Call.Name = ToolName;
+            Call.ArgumentsJson = Json;
+            Message->ToolCalls.Add(MoveTemp(Call));
+        }
+        Session.Messages.Add(Message);
+    };
+    auto AddToolResult = [&Session, &ToolName](const FGuid& RunId, const FString& Result)
+    {
+        TSharedPtr<FAgentMessage> Message = MakeShared<FAgentMessage>();
+        Message->Role = EAgentMessageRole::Tool;
+        Message->RunId = RunId;
+        Message->ToolName = ToolName;
+        Message->Text = Result;
+        Session.Messages.Add(Message);
+    };
+    AddProposal(FirstRun, {TEXT("{\"query\":\"first\"}"), TEXT("{\"query\":\"second\"}")});
+    AddProposal(SecondRun, {TEXT("{\"query\":\"other run\"}")});
+    AddToolResult(FirstRun, TEXT("{\"result\":\"first\"}"));
+    AddToolResult(SecondRun, TEXT("{\"result\":\"other run\"}"));
+    AddToolResult(FirstRun, TEXT("{\"result\":\"second\"}"));
+
+    auto AddEvent = [&Session](const FGuid& RunId, EAgentEventType Type,
+        const FString& Summary, const FString& Detail = FString())
+    {
+        TSharedPtr<FAgentEvent> Event = MakeShared<FAgentEvent>();
+        Event->RunId = RunId;
+        Event->Type = Type;
+        Event->Sequence = Session.Events.Num() + 1;
+        Event->Summary = Summary;
+        Event->Detail = Detail;
+        Session.Events.Add(Event);
+        return Event;
+    };
+    const TSharedPtr<FAgentEvent> MissingModelInput = AddEvent(FirstRun,
+        EAgentEventType::ModelRequestStarted, TEXT("请求模型"));
+    const TSharedPtr<FAgentEvent> OriginalCall = AddEvent(FirstRun,
+        EAgentEventType::ToolCallStarted, TEXT("调用工具：assets.search"),
+        TEXT("{\"query\":\"original detail\"}"));
+    AddEvent(SecondRun, EAgentEventType::ToolCallStarted, TEXT("调用工具：assets.search"));
+    AddEvent(FirstRun, EAgentEventType::ToolCallCompleted, TEXT("工具返回：assets.search"),
+        TEXT("{\"result\":\"original detail\"}"));
+    AddEvent(FirstRun, EAgentEventType::ToolCallStarted, TEXT("调用工具：assets.search"));
+    AddEvent(SecondRun, EAgentEventType::ToolCallCompleted, TEXT("工具返回：assets.search"));
+    AddEvent(FirstRun, EAgentEventType::ToolCallCompleted, TEXT("工具返回：assets.search"));
+    AddEvent(FirstRun, EAgentEventType::ModelRequestCompleted, TEXT("模型提出工具调用"));
+    AddEvent(FirstRun, EAgentEventType::RunCompleted, TEXT("任务完成"));
+    AddEvent(FGuid(), EAgentEventType::ToolCallStarted, TEXT("旧工具事件"));
+
+    const TArray<TSharedPtr<FAgentExecutionNode>> Roots = FAgentExecutionTreeModel::Build(Session);
+    TestEqual(TEXT("Two runs and a legacy group remain distinct"), Roots.Num(), 3);
+    if (Roots.Num() != 3 || Roots[0]->Children.Num() != 7
+        || Roots[1]->Children.Num() != 2 || Roots[2]->Children.Num() != 1) { return false; }
+
+    auto DetailAt = [](const TSharedPtr<FAgentExecutionNode>& Step) -> FString
+    { return Step->Children.Num() == 1 ? Step->Children[0]->DisplayDetail : FString(); };
+    TestEqual(TEXT("Unavailable model request input is stated accurately"),
+        DetailAt(Roots[0]->Children[0]),
+        FString(TEXT("详情未保存，无法还原完整模型调用输入。")));
+    TestEqual(TEXT("An original call detail takes priority"), DetailAt(Roots[0]->Children[1]),
+        FString(TEXT("{\"query\":\"original detail\"}")));
+    TestEqual(TEXT("Original detail still advances the matching result"),
+        DetailAt(Roots[0]->Children[2]), FString(TEXT("{\"result\":\"original detail\"}")));
+    TestEqual(TEXT("Second call uses the second proposal in its own run"),
+        DetailAt(Roots[0]->Children[3]), FString(TEXT("{\"query\":\"second\"}")));
+    TestEqual(TEXT("Second result uses the second result in its own run"),
+        DetailAt(Roots[0]->Children[4]), FString(TEXT("{\"result\":\"second\"}")));
+    TestEqual(TEXT("Other run with the same tool has its own arguments"),
+        DetailAt(Roots[1]->Children[0]), FString(TEXT("{\"query\":\"other run\"}")));
+    TestEqual(TEXT("Other run with the same tool has its own result"),
+        DetailAt(Roots[1]->Children[1]), FString(TEXT("{\"result\":\"other run\"}")));
+    TestTrue(TEXT("An empty model proposal has no invented detail"),
+        Roots[0]->Children[5]->Children.IsEmpty());
+    TestTrue(TEXT("A no-payload completion has no empty detail"),
+        Roots[0]->Children[6]->Children.IsEmpty());
+    TestTrue(TEXT("A legacy event cannot borrow another Run's arguments"),
+        Roots[2]->Children[0]->Children.IsEmpty());
+    TestTrue(TEXT("Missing model input remains absent from the original event"),
+        MissingModelInput->Detail.IsEmpty());
+    TestEqual(TEXT("Original event detail remains unchanged"), OriginalCall->Detail,
+        FString(TEXT("{\"query\":\"original detail\"}")));
+
+    FAgentSession AmbiguousSession;
+    const FGuid MissingEventRun = FGuid::NewGuid();
+    const FGuid WrongNameRun = FGuid::NewGuid();
+    const FGuid EmptyPayloadRun = FGuid::NewGuid();
+    auto AddCallMessage = [&AmbiguousSession, &ToolName](const FGuid& RunId,
+        int32 Count, const FString& Arguments)
+    {
+        TSharedPtr<FAgentMessage> Message = MakeShared<FAgentMessage>();
+        Message->Role = EAgentMessageRole::Assistant;
+        Message->RunId = RunId;
+        for (int32 Index = 0; Index < Count; ++Index)
+        {
+            FAgentToolCall Call;
+            Call.Name = ToolName;
+            Call.ArgumentsJson = Arguments;
+            Message->ToolCalls.Add(MoveTemp(Call));
+        }
+        AmbiguousSession.Messages.Add(Message);
+    };
+    auto AddToolEvent = [&AmbiguousSession](const FGuid& RunId,
+        EAgentEventType Type, const FString& Summary)
+    {
+        TSharedPtr<FAgentEvent> Event = MakeShared<FAgentEvent>();
+        Event->RunId = RunId;
+        Event->Type = Type;
+        Event->Sequence = AmbiguousSession.Events.Num() + 1;
+        Event->Summary = Summary;
+        AmbiguousSession.Events.Add(Event);
+    };
+    AddCallMessage(MissingEventRun, 2, TEXT("{\"query\":\"could be wrong\"}"));
+    AddToolEvent(MissingEventRun, EAgentEventType::ToolCallStarted,
+        TEXT("调用工具：assets.search"));
+    AddCallMessage(WrongNameRun, 1, TEXT("{\"query\":\"wrong name\"}"));
+    AddToolEvent(WrongNameRun, EAgentEventType::ToolCallStarted,
+        TEXT("调用工具：actors.list"));
+    AddCallMessage(EmptyPayloadRun, 1, FString());
+    TSharedPtr<FAgentMessage> EmptyResult = MakeShared<FAgentMessage>();
+    EmptyResult->Role = EAgentMessageRole::Tool;
+    EmptyResult->RunId = EmptyPayloadRun;
+    EmptyResult->ToolName = ToolName;
+    AmbiguousSession.Messages.Add(EmptyResult);
+    AddToolEvent(EmptyPayloadRun, EAgentEventType::ToolCallStarted,
+        TEXT("调用工具：assets.search"));
+    AddToolEvent(EmptyPayloadRun, EAgentEventType::ToolCallCompleted,
+        TEXT("工具返回：assets.search"));
+    const TArray<TSharedPtr<FAgentExecutionNode>> AmbiguousRoots =
+        FAgentExecutionTreeModel::Build(AmbiguousSession);
+    TestEqual(TEXT("Ambiguous fixtures stay in separate runs"), AmbiguousRoots.Num(), 3);
+    if (AmbiguousRoots.Num() == 3)
+    {
+        TestEqual(TEXT("A missing event prevents same-name payload misattribution"),
+            DetailAt(AmbiguousRoots[0]->Children[0]),
+            FString(TEXT("历史详情无法可靠关联。")));
+        TestEqual(TEXT("A different tool name prevents payload misattribution"),
+            DetailAt(AmbiguousRoots[1]->Children[0]),
+            FString(TEXT("历史详情无法可靠关联。")));
+        TestTrue(TEXT("Empty arguments do not create an empty detail node"),
+            AmbiguousRoots[2]->Children[0]->Children.IsEmpty());
+        TestTrue(TEXT("Empty tool results do not create an empty detail node"),
+            AmbiguousRoots[2]->Children[1]->Children.IsEmpty());
+    }
     return true;
 }
 
