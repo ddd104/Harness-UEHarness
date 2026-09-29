@@ -9,6 +9,9 @@ struct BSHARNESSTOOLS_API FMCPToolDefinition
 	FString Name;
 	FString Description;
 	TSharedPtr<FJsonObject> InputSchema;
+	// Internal native handler identity. Kept out of tools/list JSON so callers cannot
+	// mistake a configured display name for the handler that actually executes.
+	FString NativeHandlerId;
 
 	TSharedRef<FJsonObject> ToJson() const;
 };

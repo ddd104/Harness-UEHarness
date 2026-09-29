@@ -4,17 +4,20 @@
 #include "AssetRegistry/IAssetRegistry.h"
 #include "Async/Async.h"
 #include "Editor.h"
+#include "Engine/Blueprint.h"
 #include "Engine/Selection.h"
 #include "EngineUtils.h"
 #include "HAL/PlatformFileManager.h"
 #include "Interfaces/IPluginManager.h"
 #include "Misc/App.h"
+#include "Misc/DateTime.h"
 #include "Misc/EngineVersion.h"
 #include "Misc/FileHelper.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
 #include "Serialization/JsonSerializer.h"
 #include "Subsystems/AssetEditorSubsystem.h"
+#include "UObject/UnrealType.h"
 
 namespace
 {
@@ -55,6 +58,7 @@ namespace
 		FMCPToolDefinition Definition;
 		Definition.Name = Name;
 		Definition.Description = Description;
+		Definition.NativeHandlerId = Name;
 		Definition.InputSchema = MakeShared<FJsonObject>();
 		Definition.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
 		Definition.InputSchema->SetObjectField(TEXT("properties"), Properties);
@@ -235,6 +239,227 @@ namespace
 		Data->SetArrayField(TEXT("dependencies"), Values);
 		Data->SetBoolField(TEXT("isScanning"), Assets().IsLoadingAssets());
 		return DataResult(Data);
+	}
+
+	FJson BlueprintVariableType(const FBPVariableDescription& Variable)
+	{
+		const FEdGraphPinType& Pin = Variable.VarType;
+		auto Type = MakeShared<FJsonObject>();
+		Type->SetStringField(TEXT("category"), Pin.PinCategory.ToString());
+		if (!Pin.PinSubCategory.IsNone())
+		{
+			Type->SetStringField(TEXT("subcategory"), Pin.PinSubCategory.ToString());
+		}
+		if (const UObject* SubcategoryObject = Pin.PinSubCategoryObject.Get())
+		{
+			Type->SetStringField(TEXT("subcategory_object"), SubcategoryObject->GetPathName());
+		}
+		const TCHAR* Container = TEXT("none");
+		switch (Pin.ContainerType)
+		{
+		case EPinContainerType::Array: Container = TEXT("array"); break;
+		case EPinContainerType::Set: Container = TEXT("set"); break;
+		case EPinContainerType::Map: Container = TEXT("map"); break;
+		default: break;
+		}
+		Type->SetStringField(TEXT("container"), Container);
+		if (Pin.IsMap())
+		{
+			Type->SetStringField(TEXT("value_category"), Pin.PinValueType.TerminalCategory.ToString());
+			if (const UObject* ValueObject = Pin.PinValueType.TerminalSubCategoryObject.Get())
+			{
+				Type->SetStringField(TEXT("value_subcategory_object"), ValueObject->GetPathName());
+			}
+		}
+		return Type;
+	}
+
+	FMCPToolResult GetBlueprintVariables(const FMCPToolArguments& Arguments)
+	{
+		check(IsInGameThread());
+		const FString Path = StringArg(Arguments, TEXT("object_path"));
+		if (!Path.StartsWith(TEXT("/Game/"), ESearchCase::CaseSensitive)
+			|| !FPackageName::IsValidObjectPath(Path) || !Path.Contains(TEXT(".")) || Path.Contains(TEXT(":")))
+		{
+			return FMCPToolResult::ProtocolError(-32602, TEXT("object_path must be a canonical /Game Blueprint asset path, e.g. /Game/Folder/BP_Name.BP_Name."));
+		}
+		const FAssetData AssetData = Assets().GetAssetByObjectPath(FSoftObjectPath(Path));
+		if (!AssetData.IsValid())
+		{
+			return FMCPToolResult::Failure(Assets().IsLoadingAssets()
+				? TEXT("Blueprint asset not found while the Asset Registry is scanning; retry after scanning completes.")
+				: TEXT("Blueprint asset not found."));
+		}
+		if (AssetData.IsRedirector() || !AssetData.IsInstanceOf(UBlueprint::StaticClass(), EResolveClass::Yes))
+		{
+			return FMCPToolResult::Failure(TEXT("The asset is not a Blueprint. Pass the Blueprint asset path, not its generated class or a redirector."));
+		}
+		UBlueprint* Blueprint = Cast<UBlueprint>(AssetData.GetAsset());
+		if (!Blueprint || Blueprint->GetPathName() != Path)
+		{
+			return FMCPToolResult::Failure(TEXT("The Blueprint could not be loaded at the requested path."));
+		}
+
+		const bool bIncludeInherited = BoolArg(Arguments, TEXT("include_inherited"), false);
+		const UClass* GeneratedClass = Blueprint->GeneratedClass;
+		const UObject* ClassDefaults = GeneratedClass ? GeneratedClass->GetDefaultObject(false) : nullptr;
+		TArray<const UBlueprint*> Sources{Blueprint};
+		if (bIncludeInherited)
+		{
+			for (const UClass* ParentClass = GeneratedClass ? GeneratedClass->GetSuperClass() : Blueprint->ParentClass.Get();
+				ParentClass; ParentClass = ParentClass->GetSuperClass())
+			{
+				if (const UBlueprint* Parent = Cast<UBlueprint>(ParentClass->ClassGeneratedBy))
+				{
+					Sources.AddUnique(Parent);
+				}
+			}
+		}
+
+		struct FVariableEntry
+		{
+			const UBlueprint* Source;
+			const FBPVariableDescription* Description;
+		};
+		TArray<FVariableEntry> AllVariables;
+		for (const UBlueprint* Source : Sources)
+		{
+			for (const FBPVariableDescription& Variable : Source->NewVariables)
+			{
+				AllVariables.Add({Source, &Variable});
+			}
+		}
+
+		const int32 Offset = IntArg(Arguments, TEXT("offset"), 0);
+		const int32 Limit = IntArg(Arguments, TEXT("limit"), 100);
+		const int32 End = static_cast<int32>(FMath::Min<int64>(AllVariables.Num(), static_cast<int64>(Offset) + Limit));
+		constexpr int32 MaxDefaultChars = 4096;
+		TArray<TSharedPtr<FJsonValue>> Variables;
+		for (int32 Index = Offset; Index < End; ++Index)
+		{
+			const FVariableEntry& Entry = AllVariables[Index];
+			const FBPVariableDescription& Variable = *Entry.Description;
+			auto Item = MakeShared<FJsonObject>();
+			Item->SetStringField(TEXT("name"), Variable.VarName.ToString());
+			Item->SetObjectField(TEXT("type"), BlueprintVariableType(Variable));
+			Item->SetStringField(TEXT("declared_in"), Entry.Source->GetPathName());
+			Item->SetBoolField(TEXT("inherited"), Entry.Source != Blueprint);
+			if (!Variable.FriendlyName.IsEmpty())
+			{
+				Item->SetStringField(TEXT("friendly_name"), Variable.FriendlyName);
+			}
+			if (!Variable.Category.IsEmpty())
+			{
+				Item->SetStringField(TEXT("category"), Variable.Category.ToString());
+			}
+			FString DefaultValue;
+			FString DefaultSource = TEXT("unavailable");
+			if (ClassDefaults && GeneratedClass)
+			{
+				if (const FProperty* Property = GeneratedClass->FindPropertyByName(Variable.VarName);
+					Property && Property->GetOwnerClass() == Entry.Source->GeneratedClass)
+				{
+					const void* Value = Property->ContainerPtrToValuePtr<void>(ClassDefaults);
+					Property->ExportTextItem_Direct(DefaultValue, Value, nullptr, const_cast<UObject*>(ClassDefaults), PPF_None);
+					DefaultSource = TEXT("generated_class_cdo");
+					Item->SetStringField(TEXT("property_type"), Property->GetCPPType());
+				}
+			}
+			if (DefaultSource == TEXT("unavailable") && !Variable.DefaultValue.IsEmpty())
+			{
+				DefaultValue = Variable.DefaultValue;
+				DefaultSource = TEXT("blueprint_descriptor");
+			}
+			Item->SetStringField(TEXT("default_source"), DefaultSource);
+			if (DefaultSource != TEXT("unavailable"))
+			{
+				const bool bTruncated = DefaultValue.Len() > MaxDefaultChars;
+				Item->SetStringField(TEXT("default_value"), bTruncated ? DefaultValue.Left(MaxDefaultChars) : DefaultValue);
+				Item->SetBoolField(TEXT("default_truncated"), bTruncated);
+			}
+			Variables.Add(MakeShared<FJsonValueObject>(Item));
+		}
+
+		auto Data = MakeShared<FJsonObject>();
+		Data->SetStringField(TEXT("read_at_utc"), FDateTime::UtcNow().ToIso8601());
+		Data->SetStringField(TEXT("object_path"), Path);
+		Data->SetBoolField(TEXT("include_inherited"), bIncludeInherited);
+		Data->SetBoolField(TEXT("has_generated_class"), GeneratedClass != nullptr);
+		Data->SetBoolField(TEXT("has_class_defaults"), ClassDefaults != nullptr);
+		Data->SetBoolField(TEXT("generated_class_may_be_stale"), Blueprint->Status != BS_UpToDate && Blueprint->Status != BS_UpToDateWithWarnings);
+		Data->SetNumberField(TEXT("total"), AllVariables.Num());
+		Data->SetNumberField(TEXT("offset"), Offset);
+		Data->SetNumberField(TEXT("limit"), Limit);
+		Data->SetNumberField(TEXT("max_default_chars"), MaxDefaultChars);
+		int32 ReturnedEnd = End;
+		bool bSizeLimited = false;
+		auto RefreshPage = [&]()
+		{
+			Data->SetArrayField(TEXT("variables"), Variables);
+			Data->SetBoolField(TEXT("hasMore"), ReturnedEnd < AllVariables.Num());
+			Data->SetBoolField(TEXT("response_size_limited"), bSizeLimited);
+			if (ReturnedEnd < AllVariables.Num())
+			{
+				Data->SetNumberField(TEXT("nextOffset"), ReturnedEnd);
+			}
+			else
+			{
+				Data->RemoveField(TEXT("nextOffset"));
+			}
+		};
+		RefreshPage();
+		// The Workbench serializes both MCP text content and structured content into
+		// its model context. Size the complete MCP result below its 16,000-char cap
+		// so the pagination cursor is not lost to a downstream preview truncation.
+		constexpr int32 MaxSerializedResultChars = 14000;
+		for (;;)
+		{
+			FMCPToolResult Result = DataResult(Data);
+			FString SerializedResult;
+			FJsonSerializer::Serialize(Result.ToJson(), TJsonWriterFactory<>::Create(&SerializedResult));
+			if (SerializedResult.Len() <= MaxSerializedResultChars)
+			{
+				return Result;
+			}
+			if (Variables.Num() > 1)
+			{
+				Variables.Pop();
+				--ReturnedEnd;
+				bSizeLimited = true;
+				RefreshPage();
+				continue;
+			}
+			if (!Variables.IsEmpty())
+			{
+				const TSharedPtr<FJsonObject> Item = Variables[0]->AsObject();
+				FString Value;
+				if (Item->TryGetStringField(TEXT("default_value"), Value) && !Value.IsEmpty())
+				{
+					Item->SetStringField(TEXT("default_value"), Value.Left(Value.Len() / 2));
+					Item->SetBoolField(TEXT("default_truncated"), true);
+					bSizeLimited = true;
+					RefreshPage();
+					continue;
+				}
+				bool bRemovedOptional = false;
+				for (const TCHAR* Optional : {TEXT("friendly_name"), TEXT("category"), TEXT("property_type")})
+				{
+					if (Item->HasField(Optional))
+					{
+						Item->RemoveField(Optional);
+						bRemovedOptional = true;
+						break;
+					}
+				}
+				if (bRemovedOptional)
+				{
+					bSizeLimited = true;
+					RefreshPage();
+					continue;
+				}
+			}
+			return FMCPToolResult::Failure(TEXT("Blueprint variable metadata exceeds the tool response size limit."));
+		}
 	}
 
 	FMCPToolResult OpenAsset(const FMCPToolArguments& Arguments)
@@ -534,6 +759,13 @@ TArray<FMCPToolBinding> CreateMCPNativeHandlers(TArray<TFuture<void>>& Backgroun
 	Properties = MakeShared<FJsonObject>();
 	AddString(Properties, TEXT("object_path"), TEXT("Full object path returned by assets.search."));
 	Register(Define(TEXT("assets.get"), TEXT("Get asset metadata and package dependencies without loading the asset."), Properties, {TEXT("object_path")}), GetAsset);
+
+	Properties = MakeShared<FJsonObject>();
+	AddString(Properties, TEXT("object_path"), TEXT("Canonical /Game Blueprint object path, e.g. /Game/Folder/BP_Name.BP_Name."));
+	AddBool(Properties, TEXT("include_inherited"), TEXT("Include variables declared by parent Blueprints; excludes native C++ properties."), false);
+	AddInteger(Properties, TEXT("offset"), 0, 0, MAX_int32);
+	AddInteger(Properties, TEXT("limit"), 100, 1, 100);
+	Register(Define(TEXT("blueprint.variables"), TEXT("Read Blueprint member variables and their class default values where available, without compiling or saving. Values are text, capped at 4096 characters each; use offset and limit to page variables."), Properties, {TEXT("object_path")}), GetBlueprintVariables);
 
 	Properties = MakeShared<FJsonObject>();
 	AddString(Properties, TEXT("object_path"), TEXT("Asset object path, package path or Copy Reference text."));

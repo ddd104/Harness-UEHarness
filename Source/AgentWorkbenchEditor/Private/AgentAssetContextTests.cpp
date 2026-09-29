@@ -233,6 +233,15 @@ bool FAgentProjectRegistryTest::RunTest(const FString& Parameters)
     TestEqual(TEXT("Sent user message retains one asset reference"), Session.Messages[0]->IncludedAssets.Num(), 1);
     TestEqual(TEXT("Run snapshot contains actual object path"),
         Session.Runner.LastSnapshot->IncludedAssets[0].ObjectPath, ProjectBlueprint->GetSoftObjectPath().ToString());
+    TestTrue(TEXT("Active Run keeps its frozen tool bindings"),
+        !Session.Runner.LastSnapshot->AllowedToolNames.IsEmpty()
+        && !Session.Runner.LastSnapshot->AllowedToolHandlerIds.IsEmpty());
+    TestEqual(TEXT("Run history receives one input snapshot"), Session.RunHistory.Num(), 1);
+    if (Session.RunHistory.Num() == 1)
+    {
+        TestTrue(TEXT("In-memory history omits tool names"), Session.RunHistory[0].AllowedToolNames.IsEmpty());
+        TestTrue(TEXT("In-memory history omits handler bindings"), Session.RunHistory[0].AllowedToolHandlerIds.IsEmpty());
+    }
     const FString SentPath = Session.Runner.LastSnapshot->IncludedAssets[0].ObjectPath;
     Session.Candidates[0]->ObjectPath = TEXT("/Game/AgentP2/Changed.Changed");
     TestEqual(TEXT("Editing next-round candidate does not alter completed Run"),

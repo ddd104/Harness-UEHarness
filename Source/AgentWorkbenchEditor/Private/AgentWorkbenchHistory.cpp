@@ -35,6 +35,33 @@ TArray<TSharedPtr<FJsonValue>> CandidateArray(const TArray<FAgentCandidate>& Can
     return Array;
 }
 
+TArray<TSharedPtr<FJsonValue>> ToolCallArray(const TArray<FAgentToolCall>& ToolCalls)
+{
+    TArray<TSharedPtr<FJsonValue>> Array;
+    for (const FAgentToolCall& ToolCall : ToolCalls)
+    {
+        FJson Item = NewObject();
+        Item->SetStringField(TEXT("id"), ToolCall.Id);
+        Item->SetStringField(TEXT("name"), ToolCall.Name);
+        Item->SetStringField(TEXT("arguments_json"), ToolCall.ArgumentsJson);
+        Item->SetStringField(TEXT("thought_signature"), ToolCall.ThoughtSignature);
+        Array.Add(Value(Item));
+    }
+    return Array;
+}
+
+FJson TurnToJson(const FAgentConversationTurn& Turn)
+{
+    FJson Json = NewObject();
+    Json->SetNumberField(TEXT("role"), static_cast<int32>(Turn.Role));
+    Json->SetStringField(TEXT("text"), Turn.Text);
+    Json->SetArrayField(TEXT("included_assets"), CandidateArray(Turn.IncludedAssets));
+    Json->SetArrayField(TEXT("tool_calls"), ToolCallArray(Turn.ToolCalls));
+    Json->SetStringField(TEXT("tool_call_id"), Turn.ToolCallId);
+    Json->SetStringField(TEXT("tool_name"), Turn.ToolName);
+    return Json;
+}
+
 FJson SnapshotToJson(const FAgentRunInputSnapshot& Snapshot)
 {
     FJson Json = NewObject();
@@ -43,9 +70,20 @@ FJson SnapshotToJson(const FAgentRunInputSnapshot& Snapshot)
     Json->SetStringField(TEXT("user_input"), Snapshot.UserInput);
     Json->SetStringField(TEXT("model"), Snapshot.ModelOptions.Model);
     Json->SetStringField(TEXT("provider"), Snapshot.Provider);
+    Json->SetNumberField(TEXT("provider_type"), static_cast<int32>(Snapshot.ProviderType));
     Json->SetNumberField(TEXT("max_output_tokens"), Snapshot.ModelOptions.MaxOutputTokens);
+    Json->SetNumberField(TEXT("request_timeout_seconds"), Snapshot.RequestTimeoutSeconds);
+    Json->SetNumberField(TEXT("tool_timeout_seconds"), Snapshot.ToolTimeoutSeconds);
+    Json->SetNumberField(TEXT("run_timeout_seconds"), Snapshot.RunTimeoutSeconds);
+    Json->SetNumberField(TEXT("max_tool_steps"), Snapshot.MaxToolSteps);
     Json->SetStringField(TEXT("created_at"), Snapshot.CreatedAt.ToIso8601());
     Json->SetArrayField(TEXT("included_assets"), CandidateArray(Snapshot.IncludedAssets));
+    // Tool authorizations are only used by the active Run. Historical Runs never resume
+    // execution, and the actual calls and results are recorded in messages and events.
+    Json->SetBoolField(TEXT("tool_list_frozen"), Snapshot.bToolListFrozen);
+    TArray<TSharedPtr<FJsonValue>> Conversation;
+    for (const FAgentConversationTurn& Turn : Snapshot.Conversation) { Conversation.Add(Value(TurnToJson(Turn))); }
+    Json->SetArrayField(TEXT("conversation"), MoveTemp(Conversation));
     return Json;
 }
 
@@ -89,6 +127,57 @@ void ReadCandidates(const FJsonObject& Json, const TCHAR* Name, TArray<FAgentCan
     }
 }
 
+void ReadToolCalls(const FJsonObject& Json, const TCHAR* Name, TArray<FAgentToolCall>& Out)
+{
+    const TArray<TSharedPtr<FJsonValue>>* Array = nullptr;
+    if (!Json.TryGetArrayField(Name, Array)) { return; }
+    for (const TSharedPtr<FJsonValue>& Entry : *Array)
+    {
+        const TSharedPtr<FJsonObject> Item = Entry ? Entry->AsObject() : nullptr;
+        if (!Item) { continue; }
+        FAgentToolCall ToolCall;
+        if (Item->TryGetStringField(TEXT("id"), ToolCall.Id)
+            && Item->TryGetStringField(TEXT("name"), ToolCall.Name)
+            && Item->TryGetStringField(TEXT("arguments_json"), ToolCall.ArgumentsJson))
+        {
+            Item->TryGetStringField(TEXT("thought_signature"), ToolCall.ThoughtSignature);
+            Out.Add(MoveTemp(ToolCall));
+        }
+    }
+}
+
+void ReadConversation(const FJsonObject& Json, TArray<FAgentConversationTurn>& Out)
+{
+    const TArray<TSharedPtr<FJsonValue>>* Array = nullptr;
+    if (!Json.TryGetArrayField(TEXT("conversation"), Array)) { return; }
+    for (const TSharedPtr<FJsonValue>& Entry : *Array)
+    {
+        const TSharedPtr<FJsonObject> Item = Entry ? Entry->AsObject() : nullptr;
+        if (!Item) { continue; }
+        FAgentConversationTurn Turn;
+        int32 Role = 0;
+        if (!Item->TryGetNumberField(TEXT("role"), Role)
+            || Role < 0 || Role > static_cast<int32>(EAgentMessageRole::Error)
+            || !Item->TryGetStringField(TEXT("text"), Turn.Text)) { continue; }
+        Turn.Role = static_cast<EAgentMessageRole>(Role);
+        ReadCandidates(*Item, TEXT("included_assets"), Turn.IncludedAssets);
+        ReadToolCalls(*Item, TEXT("tool_calls"), Turn.ToolCalls);
+        Item->TryGetStringField(TEXT("tool_call_id"), Turn.ToolCallId);
+        Item->TryGetStringField(TEXT("tool_name"), Turn.ToolName);
+        Out.Add(MoveTemp(Turn));
+    }
+}
+
+EAgentWorkbenchProvider ProviderFromName(const FString& Name)
+{
+    if (Name == TEXT("OpenAI")) { return EAgentWorkbenchProvider::OpenAI; }
+    if (Name == TEXT("Anthropic")) { return EAgentWorkbenchProvider::Anthropic; }
+    if (Name == TEXT("Google Gemini")) { return EAgentWorkbenchProvider::Gemini; }
+    if (Name == TEXT("OpenRouter")) { return EAgentWorkbenchProvider::OpenRouter; }
+    if (Name == TEXT("Ollama")) { return EAgentWorkbenchProvider::Ollama; }
+    return EAgentWorkbenchProvider::DeepSeek;
+}
+
 bool ReadSnapshot(const FJsonObject& Json, FAgentRunInputSnapshot& Out)
 {
     if (!ReadGuid(Json, TEXT("session_id"), Out.SessionId)
@@ -97,15 +186,50 @@ bool ReadSnapshot(const FJsonObject& Json, FAgentRunInputSnapshot& Out)
         || !Json.TryGetStringField(TEXT("model"), Out.ModelOptions.Model)) { return false; }
     Json.TryGetNumberField(TEXT("max_output_tokens"), Out.ModelOptions.MaxOutputTokens);
     Json.TryGetStringField(TEXT("provider"), Out.Provider);
+    Out.ProviderType = ProviderFromName(Out.Provider);
+    int32 ProviderType = 0;
+    if (Json.TryGetNumberField(TEXT("provider_type"), ProviderType)
+        && ProviderType >= 0 && ProviderType <= static_cast<int32>(EAgentWorkbenchProvider::Ollama))
+    { Out.ProviderType = static_cast<EAgentWorkbenchProvider>(ProviderType); }
+    int32 Limit = 0;
+    if (Json.TryGetNumberField(TEXT("request_timeout_seconds"), Limit) && Limit > 0)
+    { Out.RequestTimeoutSeconds = Limit; }
+    if (Json.TryGetNumberField(TEXT("tool_timeout_seconds"), Limit) && Limit > 0)
+    { Out.ToolTimeoutSeconds = Limit; }
+    if (Json.TryGetNumberField(TEXT("run_timeout_seconds"), Limit) && Limit > 0)
+    { Out.RunTimeoutSeconds = Limit; }
+    if (Json.TryGetNumberField(TEXT("max_tool_steps"), Limit) && Limit > 0)
+    { Out.MaxToolSteps = Limit; }
     ReadDate(Json, TEXT("created_at"), Out.CreatedAt);
     ReadCandidates(Json, TEXT("included_assets"), Out.IncludedAssets);
+    const TArray<TSharedPtr<FJsonValue>>* AllowedToolNames = nullptr;
+    if (Json.TryGetArrayField(TEXT("allowed_tool_names"), AllowedToolNames))
+    {
+        for (const TSharedPtr<FJsonValue>& Entry : *AllowedToolNames)
+        {
+            FString Name;
+            if (Entry && Entry->TryGetString(Name)) { Out.AllowedToolNames.Add(MoveTemp(Name)); }
+        }
+    }
+    const TSharedPtr<FJsonObject>* ToolHandlerIds = nullptr;
+    if (Json.TryGetObjectField(TEXT("allowed_tool_handler_ids"), ToolHandlerIds) && ToolHandlerIds)
+    {
+        for (const auto& Entry : (*ToolHandlerIds)->Values)
+        {
+            FString HandlerId;
+            if (Entry.Value && Entry.Value->TryGetString(HandlerId))
+            { Out.AllowedToolHandlerIds.Add(FString(Entry.Key), MoveTemp(HandlerId)); }
+        }
+    }
+    Json.TryGetBoolField(TEXT("tool_list_frozen"), Out.bToolListFrozen);
+    ReadConversation(Json, Out.Conversation);
     return true;
 }
 
 FJson SessionToJson(const FAgentSession& Session)
 {
     FJson Json = NewObject();
-    Json->SetNumberField(TEXT("version"), 1);
+    Json->SetNumberField(TEXT("version"), 2);
     Json->SetStringField(TEXT("session_id"), Session.SessionId.ToString());
     Json->SetStringField(TEXT("title"), Session.Title);
     Json->SetBoolField(TEXT("title_manually_set"), Session.bTitleManuallySet);
@@ -129,6 +253,9 @@ FJson SessionToJson(const FAgentSession& Session)
         Item->SetStringField(TEXT("text"), Message->Text);
         Item->SetStringField(TEXT("run_id"), Message->RunId.ToString());
         Item->SetArrayField(TEXT("included_assets"), CandidateArray(Message->IncludedAssets));
+        Item->SetArrayField(TEXT("tool_calls"), ToolCallArray(Message->ToolCalls));
+        Item->SetStringField(TEXT("tool_call_id"), Message->ToolCallId);
+        Item->SetStringField(TEXT("tool_name"), Message->ToolName);
         Messages.Add(Value(Item));
     }
     Json->SetArrayField(TEXT("messages"), MoveTemp(Messages));
@@ -156,7 +283,7 @@ FJson SessionToJson(const FAgentSession& Session)
 bool SessionFromJson(const FJsonObject& Json, FAgentSession& Session)
 {
     int32 Version = 0;
-    if (!Json.TryGetNumberField(TEXT("version"), Version) || Version != 1
+    if (!Json.TryGetNumberField(TEXT("version"), Version) || (Version != 1 && Version != 2)
         || !ReadGuid(Json, TEXT("session_id"), Session.SessionId)
         || !Json.TryGetStringField(TEXT("title"), Session.Title)) { return false; }
     ReadDate(Json, TEXT("created_at"), Session.CreatedAt);
@@ -191,6 +318,9 @@ bool SessionFromJson(const FJsonObject& Json, FAgentSession& Session)
             ReadGuid(*Item, TEXT("run_id"), Message->RunId);
             Message->Role = static_cast<EAgentMessageRole>(Role);
             ReadCandidates(*Item, TEXT("included_assets"), Message->IncludedAssets);
+            ReadToolCalls(*Item, TEXT("tool_calls"), Message->ToolCalls);
+            Item->TryGetStringField(TEXT("tool_call_id"), Message->ToolCallId);
+            Item->TryGetStringField(TEXT("tool_name"), Message->ToolName);
             Session.Messages.Add(Message);
         }
     }
@@ -204,7 +334,7 @@ bool SessionFromJson(const FJsonObject& Json, FAgentSession& Session)
             int32 Type = 0;
             if (!Item->TryGetNumberField(TEXT("sequence"), Event->Sequence)
                 || !Item->TryGetNumberField(TEXT("type"), Type)
-                || Type < 0 || Type > static_cast<int32>(EAgentEventType::RunCancelled)) { continue; }
+                || Type < 0 || Type > static_cast<int32>(EAgentEventType::RunFailed)) { continue; }
             ReadGuid(*Item, TEXT("run_id"), Event->RunId);
             ReadDate(*Item, TEXT("time"), Event->Time);
             Item->TryGetStringField(TEXT("summary"), Event->Summary);

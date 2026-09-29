@@ -59,6 +59,7 @@ bool FMCPConfigDefaultsTest::RunTest(const FString& Parameters)
 	const auto Listed = Registry.ListTools();
 	if (!Listed.IsEmpty())
 	{
+		TestEqual(TEXT("Configured tool retains actual native handler identity"), Listed[0].NativeHandlerId, FString(TEXT("echo")));
 		TestEqual(TEXT("Description is configured"), Listed[0].Description, FString(TEXT("Configured description")));
 		TestTrue(TEXT("Defaulted parameter no longer required from caller"), Listed[0].InputSchema->GetArrayField(TEXT("required")).IsEmpty());
 		TestEqual(TEXT("Published schema contains narrowed bound"), Listed[0].InputSchema->GetObjectField(TEXT("properties"))->GetObjectField(TEXT("count"))->GetIntegerField(TEXT("maximum")), 5);

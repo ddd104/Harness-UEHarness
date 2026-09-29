@@ -6,6 +6,10 @@
 	"Description": "BSHarness editor plugin.",
 	"Category": "Editor",
 	"CanContainContent": false,
+	"Plugins": [
+		{ "Name": "ModelContextProtocol", "Enabled": true },
+		{ "Name": "ToolsetRegistry", "Enabled": true }
+	],
 	"Modules": [
 		{
 			"Name": "BSHarnessTools",

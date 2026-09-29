@@ -1,6 +1,6 @@
 # Agent Workbench 实施进度
 
-更新：2026-09-28。本次将对话发送从临时 Mock 流程改为真实模型请求，并修正连接状态显示；以同步更新的 `SPEC.md` 为功能和 UI 验收依据。
+更新：2026-09-29。本次将 `BSHarnessTools` 的只读工具接入模型自主工具调用循环；以 `SPEC.md` 为功能和 UI 验收依据。
 
 ## 环境发现（P0）
 
@@ -26,9 +26,9 @@
 | P0 工程勘察 | 已完成 | 不适用 | 不适用 | 不适用 |
 | P1 插件/窗口/布局/设置 | 已完成代码；已修复工具栏注册路径；新窗口首次发送前不进入历史 | UEHarnessEditor Win64 Development 通过 | 4/4 通过 | 原始工具栏未显示；修复后待图形编辑器复验 |
 | P2 候选资产/请求快照 | 已完成代码；现支持 /Game/ 蓝图及非蓝图资产，候选行仅 Object Path + X | UEHarnessEditor Win64 Development 通过 | P2 6/6、P1 回归 4/4 通过 | 未验证 |
-| P3 执行器/隔离 | 已实现单 Session 异步 HTTP 请求、取消、请求超时和回调归属校验；全局并发限额、排队与工具循环未实现 | UEHarnessEditor Win64 Development 通过 | 实际请求集成 1/1 通过 | 未验证 |
-| P4 历史持久化 | 完成候选、消息、模型、草稿及 Run 快照的保存/恢复和分叉；本次加入首次发送才显示/保存历史 | UEHarnessEditor Win64 Development 通过 | History 4/4 通过 | 未验证 |
-| P5 真实 API/蓝图只读工具 | 已实现 DeepSeek/OpenAI/OpenRouter/Ollama Chat Completions、Anthropic Messages、Gemini generateContent 的非流式纯文本请求；蓝图读取与模型工具调用未实现 | UEHarnessEditor Win64 Development 通过 | DeepSeek 实际请求 1/1 通过；其他 Provider 未验证 | 未验证 |
+| P3 执行器/隔离 | 已实现单 Session 异步 HTTP、取消、请求及 Run 超时、归属校验和模型→工具→模型循环；全局并发限额与排队未实现 | UEHarnessEditor Win64 Development 通过 | AgentWorkbench 17/17、DeepSeek 真实工具循环 1/1 通过 | 未验证 |
+| P4 历史持久化 | 完成候选、消息、模型、草稿及 Run 快照的保存/恢复和分叉；新增工具调用 ID、参数、结果及历史兼容 | UEHarnessEditor Win64 Development 通过 | AgentWorkbench 历史回归通过 | 未验证 |
+| P5 真实 API/蓝图只读工具 | 已为六种 Provider 编码/解析非流式工具调用；桥接七个只读 `BSHarnessTools` 工具并限制资产范围；蓝图图结构读取未实现 | UEHarnessEditor Win64 Development 通过 | 协议测试通过；DeepSeek 真实工具循环 1/1 通过；其他 Provider 未做真实请求 | 未验证 |
 | P6 终验/交付 | 未开始 | 未验证 | 未验证 | 未验证 |
 
 ## 早期阶段文件计划与实施记录（以下 Mock 描述为历史状态）
@@ -105,7 +105,7 @@
 
 ## 下一步
 
-先在图形编辑器内复验真实发送、连接名称、停止和历史切换；后续按 TASKS.md 补齐并发排队、模型工具调用和更深入的蓝图内容读取。
+先在图形编辑器内复验真实发送、工具步骤、停止和历史切换；后续按 TASKS.md 补齐并发排队和更深入的蓝图内容读取。
 
 ## 2026-09-28 真实模型发送修复
 
@@ -114,3 +114,40 @@
 - 项目设置仍仅保存凭据及 Base URL 的环境变量名称；请求时读取环境变量。缺少真实模型或凭据会直接提示错误，不制造回复。执行详情显示真实请求体，历史文件在 `bPersistDetailedPayloads=false` 时不保存详情正文。
 - `UEHarnessEditor Win64 Development` 编译成功。`Automation RunTests AgentWorkbench` 报告 `Saved/Automation/AgentWorkbenchFinal/index.json`，14/14 通过。单独运行 `ManualProvider.LiveRequest`，报告 `Saved/Automation/AgentWorkbenchLiveProviderFinal/index.json`，1/1 通过，已通过 UE HTTP 客户端调用当前配置的 DeepSeek `deepseek-flash` 并取得非空回复。另以相同地址、环境变量和模型完成一次短请求，服务端确认模型名有效。`git diff --check` 无空白错误。
 - 图形编辑器内手工发送、停止、切换项目设置后的即时观感未验证。当前未实现模型工具调用循环、蓝图结构读取、全局并发排队、重试或流式输出；不能把这些能力标为完成。
+
+## 2026-09-29 模型自主调用 BSHarnessTools
+
+- `FAgentModelClient` 将已授权工具编码为六种 Provider 的非流式工具定义，解析普通回复或工具提议；模型工具名使用无点号别名，并反查本次请求的允许名单。`FAgentSession` 管理模型→工具→模型循环、调用 ID、步骤上限、Run 总超时和迟到回调。`FAgentToolWorkflow` 在工具提议与实际执行之间提供异步 Gate 接口，后续流程可在此插入；停止或超时后的 Gate 不再发起工具调用。
+- `FAgentToolBridge` 从 `BSHarnessTools` 注册表读取定义并执行，只开放 `editor_info`、`project_info`、`assets.search`、`assets.get`、`actors.list`、`source.list`、`source.read`。运行时再次核对配置名称及原生处理器身份，防止配置重绑定提升权限；`assets.search` 限于 `/Game`，`assets.get` 限于本 Run 候选快照。`assets.open` 不提供自动调用。
+- 消息和历史 JSON v2 保留工具调用、参数、结果、关联 ID、Gemini 思考签名与冻结限额，旧版 JSON 仍可读取。工具步骤在对话区和执行详情显示；单次结果长度超过 16000 字符时提供显式截断信息。
+- `UEHarnessEditor Win64 Development` 编译通过；`Automation RunTests AgentWorkbench` 报告 `Saved/Automation/AgentWorkbenchToolCalling2/index.json`，17/17 通过；新增异步 Gate 取消测试单独运行，`Saved/Automation/AgentWorkbenchWorkflowCancel/index.json`，1/1 通过；`Automation RunTests BSHarness.MCP` 报告 `Saved/Automation/BSHarnessMCPToolCalling/index.json`，12/12 通过。真实 DeepSeek `deepseek-flash` 的 `ManualProvider.LiveToolCall` 报告 `Saved/Automation/AgentWorkbenchLiveToolCall/index.json`，1/1 通过，模型提出工具调用、收到工具结果并完成回复；普通 `ManualProvider.LiveRequest` 也 1/1 通过。
+- Anthropic、Gemini、OpenAI、OpenRouter、Ollama 的工具协议只完成自动化结构测试，没有真实服务请求证据。图形编辑器内手工 UI 验收未执行；全局并发排队、自动重试、流式输出与蓝图图结构读取仍未实现。
+- 最后补充通用 `RunFailed` 执行事件并重新编译成功；历史兼容回归 `Saved/Automation/AgentWorkbenchHistoryToolCalling/index.json` 为 5/5 通过。
+
+## 2026-09-29 对话与执行详情显示修正
+
+- 对话列表只显示用户输入及每个 Run 的最终 Agent 回复；模型工具提议、工具结果与错误仍留在会话结构中供模型续轮和执行详情使用，候选路径继续由候选区展示。兼容旧历史中缺少 Run ID 的 Agent 文本。
+- 执行步骤标题只显示描述；无详情的步骤不提供空展开区。展开模型请求、工具参数和结果时解析 JSON 及嵌套 JSON 字符串，将转义的换行、制表符和斜杠按实际字符显示，同时保留纯文本源码路径中的反斜杠；过长内容标明截断。
+- `UEHarnessEditor Win64 Development` 编译通过。`Automation RunTests AgentWorkbench.Display` 报告 `Saved/Automation/AgentWorkbenchDisplay/index.json`，2/2 通过。图形编辑器内手工视觉验收未执行。默认 `bPersistDetailedPayloads=false` 时，历史重启后执行事件的详情正文仍不保存，这是现有持久化设置的行为。
+
+## 2026-09-29 MCP 工具注册与蓝图变量读取
+
+- `Config/MCPTools.json` 配置当前 9 个原生 MCP 工具，新增 `bsharness.blueprint.variables`。它在 Game Thread 加载 `/Game` 蓝图，读取蓝图自身及可选父蓝图声明的成员变量、类型和可获得的默认值；标记 CDO/描述符来源、生成类可能过期状态，分页并限制完整 MCP 结果长度。不编译或保存资产。
+- Agent Workbench 从配置注册表枚举所有当前支持的原生处理器；模型响应只按本次请求提供的别名表解析。Run 快照冻结配置名与原生处理器身份，并持久化该映射，防止运行中配置换绑。别名使用不超过 64 字符的稳定名称。
+- `assets.get` 和 `blueprint.variables` 可查询经验证的 `/Game` 资产路径，无候选时模型也能先搜索再读取。`assets.open` 仅提供给本 Run 已附加的非关卡候选，执行前重新校验资产类型；搜索限定 `/Game`。配置参数约束仍由 MCP 注册表校验。
+- 本轮 UE5.8 Editor Target 使用 `-NoLink` 完成最新源码编译，退出码 0、`Result: Succeeded`。标准链接因 Rider 调试中的 Unreal Editor 占用两个插件 DLL 而报 `LNK1104`；本轮新二进制和自动化测试尚未验证，等待编辑器退出后重新链接并运行。
+
+## 2026-09-29 UE5.8 MCP 工具动态桥接
+
+- 核查本机 UE5.8 引擎源码、项目插件配置与编辑器日志：原工程只加载 `ToolsetRegistry.AgentSkillToolset`，包含 4 个工具；引擎另安装 26 个 Toolset 插件，其中 `EditorToolset` 提供 `BlueprintTools.list_variables`。`AllToolsets` 只聚合其中 21 个，不能代表全部已安装工具。按用户指定的已安装插件范围，工程配置启用 `AllToolsets` 和其余 5 个工具集插件，限定 Editor 目标。
+- Agent Workbench 在 Run 开始时冻结 `BSHarnessTools`、已加载 UE ToolsetRegistry 和独立 MCP 工具的完整目录、实例身份和 Schema 指纹。模型只接收原生工具与 `ue_mcp.catalog.search`、`ue_mcp.catalog.describe`、`ue_mcp.call_tool` 三个入口；目录分页查询和按需调用覆盖完整冻结目录，避免一次发送大量工具 Schema。运行中重新注册或更改的工具不能沿用旧 Run 的权限。
+- 所有实际 UE MCP 工具及 `assets.open` 都在独立的 Slate 模态窗口中显示实际工具名与解码后的参数，逐次明确允许；无人值守默认拒绝。审批窗口不把参数写入 UE 日志。前置 Gate、审批和执行相互独立；审批后再次检查取消、Run 总时限、冻结身份和参数。UE ToolsetRegistry 没有通用取消/回滚接口，超时后的底层工具可能继续运行，不自动重试写入工具。
+- 新增递归 JSON Schema 参数校验器；审批前和实际执行前均校验 required、类型、额外字段、枚举、嵌套结构及大小边界等。修复资产工具 JSON 深拷贝时未初始化目标对象的问题，避免 `assets.open` 配置 Schema 或默认 `assets.search` 参数触发空指针。
+- 使用 UE5.8 `UEHarnessEditor Win64 Development -NoLink -NoHotReload` 完成源码编译，退出码 0。由于 Development 编辑器正在运行，使用独立 `UEHarnessEditor Win64 DebugGame -NoHotReload` 完整编译和链接，退出码 0。DebugGame 命令行自动化 `Automation RunTests AgentWorkbench` 报告 `Saved/Automation/AgentWorkbenchUnrealMCPBridge2/index.json`：25/25 成功；`Automation RunTests BSHarness.MCP` 报告 `Saved/Automation/BSHarnessMCPUnrealBridge/index.json`：13/13 成功。实际批准后的 `AgentSkillToolset.ListSkills` 只读调用、目录搜索/描述/调用链路及拒绝未批准调用均通过。
+- 启用全部 26 个 Toolset 插件后，DebugGame Editor Target 构建退出码 0；`Automation RunTests AgentWorkbench` 报告 `Saved/Automation/AgentWorkbenchAllInstalledToolsets/index.json`：25/25 成功。运行日志记录 57 个已注册工具集；补充的 `UnrealMCPCatalog` 自动化报告 `Saved/Automation/AgentWorkbenchBlueprintCatalog/index.json`：1/1 成功，目录包含 876 个可调用 UE MCP 工具，并断言 `BlueprintTools.list_variables` 已进入目录。图形界面的审批窗口尚未手工验收，当前 Development 编辑器仍占用旧 DLL；需要保存并关闭后再完成 Development 链接和加载验证。
+
+## 2026-09-29 历史工具目录精简与 Schema 回归
+
+- Run 开始时仍在内存中冻结当时可用的工具和处理器身份，用于目录查询、调用前校验与审批后复核；加入 `RunHistory` 的副本不再包含完整工具名单及处理器映射，保存的 Session JSON 也不再写入这两个字段。历史仍保存实际工具调用、参数、结果和关联 ID。旧版含完整目录的历史可以读取，再次保存时会去除这两个字段。
+- UE MCP 目录专项发现 876 个可调用工具，其中原有 5 个工具的 Schema 使用 `oneOf` 等组合规则，曾被调用前参数校验器拒绝。已补齐 `oneOf`、`anyOf`、`allOf` 的结构和参数匹配校验；全部 876 个已发现工具的 Schema 通过支持性检查。
+- 最新 DebugGame Editor Target 完整编译与链接退出码 0；Development Editor Target 使用 `-NoLink -NoHotReload` 源码编译退出码 0。用 `UnrealEditor-Win64-DebugGame-Cmd.exe` 执行自动化：`AgentWorkbenchCatalogSchemaCompositions` 1/1、`AgentWorkbenchSchemaCompositions` 5/5、`AgentWorkbenchCatalogCompositionsFull` 27/27、`BSHarnessMCPCatalogCompositionsFull` 13/13，均无失败或警告。`git diff --check` 退出码 0。当前图形 Development 编辑器仍运行旧 DLL，尚未完成 Development 链接和界面手工验收。

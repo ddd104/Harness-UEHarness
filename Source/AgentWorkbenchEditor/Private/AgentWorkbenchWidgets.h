@@ -52,6 +52,7 @@ private:
     TSharedRef<ITableRow> MakeRow(TSharedPtr<FAgentMessage> Item, const TSharedRef<STableViewBase>& Owner);
     TSharedPtr<FAgentSession> Session;
     TSharedPtr<SListView<TSharedPtr<FAgentMessage>>> List;
+    TArray<TSharedPtr<FAgentMessage>> VisibleMessages;
 };
 
 class SAgentAssetCandidatePanel : public SCompoundWidget

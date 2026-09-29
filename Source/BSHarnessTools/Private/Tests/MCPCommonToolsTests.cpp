@@ -4,8 +4,10 @@
 
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Curves/CurveFloat.h"
+#include "Engine/Blueprint.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/StringOutputDevice.h"
+#include "Serialization/JsonSerializer.h"
 #include "UObject/Package.h"
 #include "Editor.h"
 #include "Subsystems/AssetEditorSubsystem.h"
@@ -33,7 +35,8 @@ bool FMCPBuiltinCatalogTest::RunTest(const FString& Parameters)
 	auto& Registry = FBSHarnessToolsModule::Get().GetToolRegistry();
 	const auto Tools = Registry.ListTools();
 	for (const TCHAR* Name : {TEXT("bsharness.editor_info"), TEXT("bsharness.project_info"), TEXT("bsharness.assets.search"),
-		TEXT("bsharness.assets.get"), TEXT("bsharness.assets.open"), TEXT("bsharness.actors.list"), TEXT("bsharness.source.list"), TEXT("bsharness.source.read")})
+		TEXT("bsharness.assets.get"), TEXT("bsharness.blueprint.variables"), TEXT("bsharness.assets.open"),
+		TEXT("bsharness.actors.list"), TEXT("bsharness.source.list"), TEXT("bsharness.source.read")})
 	{
 		TestTrue(FString::Printf(TEXT("Tool registered: %s"), Name), Tools.ContainsByPredicate(
 			[&](const FMCPToolDefinition& Tool) { return Tool.Name.Equals(Name, ESearchCase::CaseSensitive); }));
@@ -60,6 +63,7 @@ bool FMCPBuiltinCatalogTest::RunTest(const FString& Parameters)
 	Arguments->SetStringField(TEXT("root"), TEXT("engine"));
 	TestEqual(TEXT("Unknown source root rejected"), CallBuiltin(*this, TEXT("bsharness.source.list"), Arguments).ProtocolErrorCode.Get(0), -32602);
 	TestEqual(TEXT("Required asset path checked"), CallBuiltin(*this, TEXT("bsharness.assets.get"), MakeShared<FJsonObject>()).ProtocolErrorCode.Get(0), -32602);
+	TestEqual(TEXT("Required Blueprint path checked"), CallBuiltin(*this, TEXT("bsharness.blueprint.variables"), MakeShared<FJsonObject>()).ProtocolErrorCode.Get(0), -32602);
 	return true;
 }
 
@@ -178,6 +182,111 @@ bool FMCPBuiltinSourceTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMCPBuiltinBlueprintVariablesTest, "BSHarness.MCP.Builtins.BlueprintVariables",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMCPBuiltinBlueprintVariablesTest::RunTest(const FString& Parameters)
+{
+	// In-memory fixture exercises descriptor fallback without compiling or saving an asset.
+	const FString PackagePath = TEXT("/Game/__BSHarnessVariables_") + FGuid::NewGuid().ToString(EGuidFormats::Digits) + TEXT("/Fixture");
+	UPackage* Package = CreatePackage(*PackagePath);
+	UBlueprint* Blueprint = NewObject<UBlueprint>(Package, TEXT("Fixture"), RF_Public | RF_Standalone);
+	FBPVariableDescription First;
+	First.VarName = TEXT("Count");
+	First.VarType.PinCategory = TEXT("int");
+	First.DefaultValue = TEXT("42");
+	Blueprint->NewVariables.Add(First);
+	FBPVariableDescription Second;
+	Second.VarName = TEXT("EmptyLabel");
+	Second.VarType.PinCategory = TEXT("string");
+	Blueprint->NewVariables.Add(Second);
+	FAssetRegistryModule::AssetCreated(Blueprint);
+	UCurveFloat* NotBlueprint = NewObject<UCurveFloat>(Package, TEXT("Curve"), RF_Public | RF_Standalone);
+	FAssetRegistryModule::AssetCreated(NotBlueprint);
+
+	auto Arguments = MakeShared<FJsonObject>();
+	Arguments->SetStringField(TEXT("object_path"), Blueprint->GetPathName());
+	Arguments->SetNumberField(TEXT("limit"), 1);
+	const auto Result = CallBuiltin(*this, TEXT("bsharness.blueprint.variables"), Arguments);
+	TestFalse(TEXT("Blueprint variables succeed"), Result.bIsError);
+	if (Result.StructuredContent)
+	{
+		const auto& Data = *Result.StructuredContent;
+		TestEqual(TEXT("Two variables total"), Data.GetIntegerField(TEXT("total")), 2);
+		TestTrue(TEXT("Page has more"), Data.GetBoolField(TEXT("hasMore")));
+		TestFalse(TEXT("No generated class reported"), Data.GetBoolField(TEXT("has_generated_class")));
+		TestTrue(TEXT("Timestamp provided"), Data.HasField(TEXT("read_at_utc")));
+		const auto& Variables = Data.GetArrayField(TEXT("variables"));
+		TestEqual(TEXT("One variable on first page"), Variables.Num(), 1);
+		if (!Variables.IsEmpty())
+		{
+			const auto Item = Variables[0]->AsObject();
+			TestEqual(TEXT("Variable name"), Item->GetStringField(TEXT("name")), FString(TEXT("Count")));
+			TestEqual(TEXT("Pin type"), Item->GetObjectField(TEXT("type"))->GetStringField(TEXT("category")), FString(TEXT("int")));
+			TestEqual(TEXT("Fallback default"), Item->GetStringField(TEXT("default_value")), FString(TEXT("42")));
+			TestEqual(TEXT("Fallback source identified"), Item->GetStringField(TEXT("default_source")), FString(TEXT("blueprint_descriptor")));
+		}
+	}
+	Arguments->SetNumberField(TEXT("offset"), 1);
+	const auto SecondPage = CallBuiltin(*this, TEXT("bsharness.blueprint.variables"), Arguments);
+	if (SecondPage.StructuredContent)
+	{
+		const auto& Variables = SecondPage.StructuredContent->GetArrayField(TEXT("variables"));
+		TestEqual(TEXT("Second page contains one variable"), Variables.Num(), 1);
+		if (!Variables.IsEmpty())
+		{
+			const auto Item = Variables[0]->AsObject();
+			TestEqual(TEXT("Unavailable default distinguished from empty string"), Item->GetStringField(TEXT("default_source")), FString(TEXT("unavailable")));
+			TestFalse(TEXT("Unavailable default omitted"), Item->HasField(TEXT("default_value")));
+		}
+	}
+	for (int32 Index = 0; Index < 20; ++Index)
+	{
+		FBPVariableDescription Extra;
+		Extra.VarName = *FString::Printf(TEXT("Bulk_%d"), Index);
+		Extra.VarType.PinCategory = TEXT("string");
+		Extra.DefaultValue = FString::ChrN(1000, TEXT('x'));
+		Blueprint->NewVariables.Add(Extra);
+	}
+	Arguments->SetNumberField(TEXT("offset"), 0);
+	Arguments->SetNumberField(TEXT("limit"), 100);
+	const auto Bounded = CallBuiltin(*this, TEXT("bsharness.blueprint.variables"), Arguments);
+	TestFalse(TEXT("Large variable list succeeds"), Bounded.bIsError);
+	FString Serialized;
+	FJsonSerializer::Serialize(Bounded.ToJson(), TJsonWriterFactory<>::Create(&Serialized));
+	TestTrue(TEXT("Entire MCP result stays below Runner truncation limit"), Serialized.Len() <= 14000);
+	if (Bounded.StructuredContent)
+	{
+		TestTrue(TEXT("Size-limited page reports more"), Bounded.StructuredContent->GetBoolField(TEXT("hasMore")));
+		TestTrue(TEXT("Size limit is explicit"), Bounded.StructuredContent->GetBoolField(TEXT("response_size_limited")));
+		const int32 NextOffset = Bounded.StructuredContent->GetIntegerField(TEXT("nextOffset"));
+		TestTrue(TEXT("Cursor advances within variable list"), NextOffset > 0 && NextOffset < 22);
+		Arguments->SetNumberField(TEXT("offset"), NextOffset);
+		const auto Next = CallBuiltin(*this, TEXT("bsharness.blueprint.variables"), Arguments);
+		TestFalse(TEXT("Following page succeeds"), Next.bIsError);
+		if (Next.StructuredContent)
+		{
+			TestFalse(TEXT("Following page has variables"), Next.StructuredContent->GetArrayField(TEXT("variables")).IsEmpty());
+		}
+	}
+	Arguments->SetStringField(TEXT("object_path"), TEXT("/Engine/EngineMaterials/DefaultMaterial.DefaultMaterial"));
+	TestEqual(TEXT("Outside /Game rejected"), CallBuiltin(*this, TEXT("bsharness.blueprint.variables"), Arguments).ProtocolErrorCode.Get(0), -32602);
+	Arguments->SetStringField(TEXT("object_path"), PackagePath / TEXT("Missing.Missing"));
+	TestTrue(TEXT("Missing Blueprint fails"), CallBuiltin(*this, TEXT("bsharness.blueprint.variables"), Arguments).bIsError);
+	Arguments->SetStringField(TEXT("object_path"), NotBlueprint->GetPathName());
+	TestTrue(TEXT("Non-Blueprint asset rejected"), CallBuiltin(*this, TEXT("bsharness.blueprint.variables"), Arguments).bIsError);
+
+	FAssetRegistryModule::AssetDeleted(NotBlueprint);
+	NotBlueprint->ClearFlags(RF_Public | RF_Standalone);
+	NotBlueprint->MarkAsGarbage();
+	FAssetRegistryModule::AssetDeleted(Blueprint);
+	Blueprint->ClearFlags(RF_Public | RF_Standalone);
+	Blueprint->MarkAsGarbage();
+	Package->SetDirtyFlag(false);
+	Package->MarkAsGarbage();
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMCPConsoleTest, "BSHarness.MCP.Builtins.Console",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
@@ -188,7 +297,7 @@ bool FMCPConsoleTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Handler discovery command handled"), Module.Exec_Editor(nullptr, TEXT("BSHarness.MCP.Handlers"), Output));
 	TestTrue(TEXT("Handler metadata printed"), Output.Contains(TEXT("assets.search")) && Output.Contains(TEXT("configurationFile")));
 	TestTrue(TEXT("Reload command handled"), Module.Exec_Editor(nullptr, TEXT("BSHarness.MCP.Reload"), Output));
-	TestTrue(TEXT("Default config reload succeeds"), Output.Contains(TEXT("Loaded 8 tools")));
+	TestTrue(TEXT("Default config reload succeeds"), Output.Contains(TEXT("Loaded 9 tools")));
 	TestTrue(TEXT("List command handled"), Module.Exec_Editor(nullptr, TEXT("BSHarness.MCP.List"), Output));
 	TestTrue(TEXT("JSON arguments preserved"), Module.Exec_Editor(nullptr,
 		TEXT("BSHarness.MCP.Call bsharness.assets.search {\"name_contains\":\"name with spaces\",\"limit\":1}"), Output));

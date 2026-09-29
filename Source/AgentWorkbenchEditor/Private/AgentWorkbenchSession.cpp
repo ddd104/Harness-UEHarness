@@ -4,13 +4,43 @@
 #include "AgentWorkbenchHistory.h"
 #include "AgentWorkbenchSettings.h"
 #include "AgentModelClient.h"
+#include "AgentToolBridge.h"
+#include "AgentToolWorkflow.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Containers/Ticker.h"
 #include "HAL/FileManager.h"
+#include "HAL/PlatformTime.h"
 #include "Misc/MessageDialog.h"
 #include "Misc/Paths.h"
 #include "Interfaces/IHttpRequest.h"
+#include "Serialization/JsonSerializer.h"
 #include "Widgets/SWindow.h"
+
+namespace
+{
+void ClearRunTimeout(FAgentRunner& Runner)
+{
+    if (Runner.RunTimeoutHandle.IsValid())
+    {
+        FTSTicker::RemoveTicker(Runner.RunTimeoutHandle);
+        Runner.RunTimeoutHandle.Reset();
+    }
+}
+
+bool StartModelRequest(const TSharedRef<FAgentSession>& Session, FString& OutError)
+{
+    check(IsInGameThread());
+    if (FPlatformTime::Seconds() >= Session->Runner.RunDeadlineSeconds)
+    {
+        OutError = TEXT("Run exceeded its total timeout.");
+        return false;
+    }
+    Session->Runner.CurrentToolCallId.Empty();
+    Session->Runner.CurrentRequestId = FGuid::NewGuid();
+    Session->Runner.Phase = EAgentRunPhase::RequestingModel;
+    return FAgentModelClient::Start(Session, Session->Runner.CurrentRequestId, OutError);
+}
+}
 
 void FAgentSession::Touch()
 {
@@ -35,6 +65,12 @@ void FAgentRunner::Cancel()
 {
     if (State != EAgentRunState::Running) { return; }
     State = EAgentRunState::Cancelled;
+    if (CancellationToken) { CancellationToken->store(true); }
+    Phase = EAgentRunPhase::None;
+    CurrentRequestId.Invalidate();
+    CurrentToolCallId.Empty();
+    PendingToolCalls.Empty();
+    ClearRunTimeout(*this);
     if (ActiveRequest) { ActiveRequest->CancelRequest(); ActiveRequest.Reset(); }
 }
 
@@ -51,15 +87,34 @@ bool FAgentSession::BeginRun(FString& OutError)
     if (!FAgentAssetContextService::BuildSnapshot(*this, RunId,
         [](const FSoftObjectPath& Path) { return FAgentAssetContextService::LookupAsset(Path); },
         Snapshot, OutError)) { return false; }
-    Snapshot.Provider = FAgentModelClient::ProviderName(GetDefault<UAgentWorkbenchSettings>()->ProviderType);
+    const UAgentWorkbenchSettings* Settings = GetDefault<UAgentWorkbenchSettings>();
+    Snapshot.ProviderType = Settings->ProviderType;
+    Snapshot.Provider = FAgentModelClient::ProviderName(Snapshot.ProviderType);
+    Snapshot.RequestTimeoutSeconds = FMath::Max(1, Settings->RequestTimeoutSeconds);
+    Snapshot.ToolTimeoutSeconds = FMath::Max(1, Settings->ToolTimeoutSeconds);
+    Snapshot.RunTimeoutSeconds = FMath::Max(1, Settings->RunTimeoutSeconds);
+    Snapshot.MaxToolSteps = FMath::Max(1, Settings->MaxToolSteps);
+    FAgentToolBridge::FreezeAvailableTools(Snapshot);
+    Snapshot.bToolListFrozen = true;
+    TSet<FGuid> CompletedRuns;
+    for (const TSharedPtr<FAgentEvent>& Event : Events)
+    {
+        if (Event && Event->Type == EAgentEventType::RunCompleted)
+        { CompletedRuns.Add(Event->RunId); }
+    }
     for (const TSharedPtr<FAgentMessage>& Message : Messages)
     {
-        if (!Message || (Message->Role != EAgentMessageRole::User && Message->Role != EAgentMessageRole::Assistant)
-            || (Message->Role == EAgentMessageRole::Assistant && Message->Text.StartsWith(TEXT("[Mock]")))) { continue; }
+        if (!Message || Message->Role == EAgentMessageRole::Error
+            || (Message->Role == EAgentMessageRole::Assistant && Message->Text.StartsWith(TEXT("[Mock]")))
+            || (Message->Role != EAgentMessageRole::User && !CompletedRuns.Contains(Message->RunId)))
+        { continue; }
         FAgentConversationTurn Turn;
         Turn.Role = Message->Role;
         Turn.Text = Message->Text;
         Turn.IncludedAssets = Message->IncludedAssets;
+        Turn.ToolCalls = Message->ToolCalls;
+        Turn.ToolCallId = Message->ToolCallId;
+        Turn.ToolName = Message->ToolName;
         Snapshot.Conversation.Add(MoveTemp(Turn));
     }
     FAgentConversationTurn Current;
@@ -69,8 +124,21 @@ bool FAgentSession::BeginRun(FString& OutError)
     Runner.CurrentRunId = RunId;
     Runner.LastSnapshot = MakeShared<FAgentRunInputSnapshot>(MoveTemp(Snapshot));
     const FAgentRunInputSnapshot& Frozen = *Runner.LastSnapshot;
-    RunHistory.Add(Frozen);
+    Runner.Conversation = Frozen.Conversation;
+    Runner.PendingToolCalls.Empty();
+    Runner.NextToolCallIndex = 0;
+    Runner.ToolSteps = 0;
+    Runner.CurrentRequestId.Invalidate();
+    Runner.CurrentToolCallId.Empty();
+    Runner.RunDeadlineSeconds = FPlatformTime::Seconds() + Frozen.RunTimeoutSeconds;
+    Runner.CancellationToken = MakeShared<std::atomic<bool>, ESPMode::ThreadSafe>(false);
+    if (!Runner.ToolWorkflow) { Runner.ToolWorkflow = MakeShared<FAgentToolWorkflow>(); }
+    FAgentRunInputSnapshot Historical = Frozen;
+    Historical.AllowedToolNames.Reset();
+    Historical.AllowedToolHandlerIds.Reset();
+    RunHistory.Add(MoveTemp(Historical));
     Runner.State = EAgentRunState::Running;
+    Runner.Phase = EAgentRunPhase::None;
     TSharedPtr<FAgentMessage> User = MakeShared<FAgentMessage>();
     User->Role = EAgentMessageRole::User;
     User->Text = Frozen.UserInput;
@@ -89,7 +157,21 @@ bool FAgentSession::Send(FString& OutError)
 {
     if (!FAgentModelClient::Validate(*GetDefault<UAgentWorkbenchSettings>(), ModelOptions.Model, OutError)) { return false; }
     if (!BeginRun(OutError)) { return false; }
-    if (!FAgentModelClient::Start(AsShared(), OutError))
+    const FGuid RunId = Runner.CurrentRunId;
+    TWeakPtr<FAgentSession> WeakSession = AsShared();
+    Runner.RunTimeoutHandle = FTSTicker::GetCoreTicker().AddTicker(
+        FTickerDelegate::CreateLambda([WeakSession, RunId](float)
+        {
+            if (const TSharedPtr<FAgentSession> Current = WeakSession.Pin();
+                Current && Current->Runner.State == EAgentRunState::Running
+                && Current->Runner.CurrentRunId == RunId)
+            {
+                Current->Runner.RunTimeoutHandle.Reset();
+                Current->FailRun(RunId, TEXT("Run exceeded its total timeout."));
+            }
+            return false;
+        }), static_cast<float>(Runner.LastSnapshot->RunTimeoutSeconds));
+    if (!StartModelRequest(AsShared(), OutError))
     {
         FailRun(Runner.CurrentRunId, OutError);
         return true;
@@ -102,6 +184,10 @@ void FAgentSession::CompleteRun(const FGuid& RunId, const FString& ReplyText)
     check(IsInGameThread());
     if (Runner.State != EAgentRunState::Running || Runner.CurrentRunId != RunId) { return; }
     Runner.ActiveRequest.Reset();
+    if (Runner.CancellationToken) { Runner.CancellationToken->store(true); }
+    Runner.Phase = EAgentRunPhase::None;
+    Runner.CurrentRequestId.Invalidate();
+    ClearRunTimeout(Runner);
     TSharedPtr<FAgentMessage> Reply = MakeShared<FAgentMessage>();
     Reply->Role = EAgentMessageRole::Assistant;
     Reply->Text = ReplyText;
@@ -117,15 +203,145 @@ void FAgentSession::FailRun(const FGuid& RunId, const FString& Error)
 {
     check(IsInGameThread());
     if (Runner.State != EAgentRunState::Running || Runner.CurrentRunId != RunId) { return; }
-    Runner.ActiveRequest.Reset();
     Runner.State = EAgentRunState::Failed;
+    if (Runner.CancellationToken) { Runner.CancellationToken->store(true); }
+    Runner.Phase = EAgentRunPhase::None;
+    Runner.CurrentRequestId.Invalidate();
+    Runner.CurrentToolCallId.Empty();
+    Runner.PendingToolCalls.Empty();
+    ClearRunTimeout(Runner);
+    if (Runner.ActiveRequest) { Runner.ActiveRequest->CancelRequest(); Runner.ActiveRequest.Reset(); }
     TSharedPtr<FAgentMessage> Failure = MakeShared<FAgentMessage>();
     Failure->Role = EAgentMessageRole::Error;
     Failure->RunId = RunId;
     Failure->Text = Error;
     Messages.Add(Failure);
-    AddEvent(EAgentEventType::ModelRequestCompleted, RunId, TEXT("模型请求失败"), Error);
+    AddEvent(EAgentEventType::RunFailed, RunId, TEXT("任务失败"), Error);
     Touch();
+}
+
+void FAgentSession::OnModelResponse(const FGuid& RunId, const FGuid& RequestId,
+    const FString& ReplyText, const TArray<FAgentToolCall>& ToolCalls)
+{
+    check(IsInGameThread());
+    if (Runner.State != EAgentRunState::Running || Runner.Phase != EAgentRunPhase::RequestingModel
+        || Runner.CurrentRunId != RunId || Runner.CurrentRequestId != RequestId) { return; }
+    Runner.ActiveRequest.Reset();
+    if (FPlatformTime::Seconds() >= Runner.RunDeadlineSeconds)
+    { FailRun(RunId, TEXT("Run exceeded its total timeout.")); return; }
+    if (ToolCalls.IsEmpty())
+    {
+        if (ReplyText.TrimStartAndEnd().IsEmpty())
+        { FailRun(RunId, TEXT("Model returned neither a reply nor a tool call.")); return; }
+        CompleteRun(RunId, ReplyText);
+        return;
+    }
+    if (ToolCalls.Num() > Runner.LastSnapshot->MaxToolSteps - Runner.ToolSteps)
+    { FailRun(RunId, TEXT("Model requested more tool calls than this Run permits.")); return; }
+    TSet<FString> SeenCallIds;
+    for (const FAgentToolCall& Call : ToolCalls)
+    {
+        if (Call.Id.IsEmpty() || Call.Name.IsEmpty() || Call.ArgumentsJson.Len() > 65536
+            || SeenCallIds.Contains(Call.Id))
+        { FailRun(RunId, TEXT("Model returned an invalid or duplicate tool call.")); return; }
+        SeenCallIds.Add(Call.Id);
+    }
+    FAgentConversationTurn AssistantTurn;
+    AssistantTurn.Role = EAgentMessageRole::Assistant;
+    AssistantTurn.Text = ReplyText;
+    AssistantTurn.ToolCalls = ToolCalls;
+    Runner.Conversation.Add(AssistantTurn);
+    TSharedPtr<FAgentMessage> Proposal = MakeShared<FAgentMessage>();
+    Proposal->Role = EAgentMessageRole::Assistant;
+    Proposal->RunId = RunId;
+    Proposal->Text = ReplyText;
+    Proposal->ToolCalls = ToolCalls;
+    Messages.Add(Proposal);
+    AddEvent(EAgentEventType::ModelRequestCompleted, RunId,
+        FString::Printf(TEXT("模型提出 %d 个工具调用"), ToolCalls.Num()), ReplyText);
+    Runner.Phase = EAgentRunPhase::ProcessingTools;
+    Runner.PendingToolCalls = ToolCalls;
+    Runner.NextToolCallIndex = 0;
+    Touch();
+    ExecuteNextTool(RunId);
+}
+
+void FAgentSession::ExecuteNextTool(const FGuid& RunId)
+{
+    check(IsInGameThread());
+    if (Runner.State != EAgentRunState::Running || Runner.Phase != EAgentRunPhase::ProcessingTools
+        || Runner.CurrentRunId != RunId) { return; }
+    if (FPlatformTime::Seconds() >= Runner.RunDeadlineSeconds)
+    { FailRun(RunId, TEXT("Run exceeded its total timeout.")); return; }
+    if (Runner.NextToolCallIndex >= Runner.PendingToolCalls.Num())
+    {
+        Runner.PendingToolCalls.Empty();
+        FString Error;
+        if (!StartModelRequest(AsShared(), Error)) { FailRun(RunId, Error); }
+        return;
+    }
+    const FAgentToolCall Call = Runner.PendingToolCalls[Runner.NextToolCallIndex];
+    Runner.CurrentToolCallId = Call.Id;
+    ++Runner.ToolSteps;
+    AddEvent(EAgentEventType::ToolCallStarted, RunId,
+        FString::Printf(TEXT("调用工具：%s"), *Call.Name), Call.ArgumentsJson);
+    Touch();
+    const double Remaining = Runner.RunDeadlineSeconds - FPlatformTime::Seconds();
+    const double Timeout = FMath::Min<double>(Runner.LastSnapshot->ToolTimeoutSeconds, Remaining);
+    if (Timeout <= 0.0) { FailRun(RunId, TEXT("Run exceeded its total timeout.")); return; }
+    const FAgentToolInvocation Invocation{Runner.LastSnapshot.ToSharedRef(),
+        Runner.CancellationToken.ToSharedRef(), Runner.CurrentRequestId, Call,
+        Runner.RunDeadlineSeconds};
+    TWeakPtr<FAgentSession> WeakSession = AsShared();
+    Runner.ToolWorkflow->Execute(Invocation, Timeout,
+        [WeakSession, RunId, CallId = Call.Id, ToolName = Call.Name](FMCPToolResult Result)
+        {
+            const TSharedPtr<FAgentSession> Current = WeakSession.Pin();
+            if (!Current) { return; }
+            FString ResultText;
+            FJsonSerializer::Serialize(Result.ToJson(), TJsonWriterFactory<>::Create(&ResultText));
+            constexpr int32 MaxToolResultChars = 16000;
+            if (ResultText.Len() > MaxToolResultChars)
+            {
+                const int32 OriginalLength = ResultText.Len();
+                TSharedRef<FJsonObject> Truncated = MakeShared<FJsonObject>();
+                Truncated->SetBoolField(TEXT("truncated"), true);
+                Truncated->SetNumberField(TEXT("original_chars"), OriginalLength);
+                Truncated->SetStringField(TEXT("preview"), ResultText.Left(MaxToolResultChars));
+                ResultText.Empty();
+                FJsonSerializer::Serialize(Truncated, TJsonWriterFactory<>::Create(&ResultText));
+            }
+            Current->OnToolResult(RunId, CallId, ToolName, ResultText);
+        });
+}
+
+void FAgentSession::OnToolResult(const FGuid& RunId, const FString& ToolCallId,
+    const FString& ToolName, const FString& ResultText)
+{
+    check(IsInGameThread());
+    if (Runner.State != EAgentRunState::Running || Runner.Phase != EAgentRunPhase::ProcessingTools
+        || Runner.CurrentRunId != RunId || Runner.CurrentToolCallId != ToolCallId
+        || !Runner.PendingToolCalls.IsValidIndex(Runner.NextToolCallIndex)
+        || Runner.PendingToolCalls[Runner.NextToolCallIndex].Id != ToolCallId) { return; }
+    FAgentConversationTurn ToolTurn;
+    ToolTurn.Role = EAgentMessageRole::Tool;
+    ToolTurn.ToolCallId = ToolCallId;
+    ToolTurn.ToolName = ToolName;
+    ToolTurn.Text = ResultText;
+    Runner.Conversation.Add(ToolTurn);
+    TSharedPtr<FAgentMessage> ResultMessage = MakeShared<FAgentMessage>();
+    ResultMessage->Role = EAgentMessageRole::Tool;
+    ResultMessage->RunId = RunId;
+    ResultMessage->ToolCallId = ToolCallId;
+    ResultMessage->ToolName = ToolName;
+    ResultMessage->Text = ResultText;
+    Messages.Add(ResultMessage);
+    AddEvent(EAgentEventType::ToolCallCompleted, RunId,
+        FString::Printf(TEXT("工具返回：%s"), *ToolName), ResultText);
+    Runner.CurrentToolCallId.Empty();
+    ++Runner.NextToolCallIndex;
+    Touch();
+    ExecuteNextTool(RunId);
 }
 
 void FAgentSession::CancelRun()

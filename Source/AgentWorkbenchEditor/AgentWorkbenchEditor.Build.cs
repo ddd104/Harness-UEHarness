@@ -8,7 +8,8 @@ public class AgentWorkbenchEditor : ModuleRules
         PublicDependencyModuleNames.AddRange(new[] { "Core", "CoreUObject" });
         PrivateDependencyModuleNames.AddRange(new[] {
             "ApplicationCore", "AssetRegistry", "ContentBrowser", "DeveloperSettings", "Engine",
-            "HTTP", "InputCore", "Json", "LevelEditor", "Slate", "SlateCore", "ToolMenus"
+            "BSHarnessTools", "HTTP", "InputCore", "Json", "LevelEditor", "ModelContextProtocol",
+            "Slate", "SlateCore", "ToolMenus", "ToolsetRegistry", "UnrealEd"
         });
     }
 }

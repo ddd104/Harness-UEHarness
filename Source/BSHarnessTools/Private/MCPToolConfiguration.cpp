@@ -258,6 +258,7 @@ bool FMCPToolConfiguration::LoadJson(const FString& Json, const TArray<FMCPToolB
 		FMCPToolBinding Binding;
 		Binding.Definition = Native->Definition;
 		Binding.Definition.Name = Name;
+		Binding.Definition.NativeHandlerId = HandlerId;
 		Binding.Definition.InputSchema = Schema;
 		Entry->TryGetStringField(TEXT("description"), Binding.Definition.Description);
 		Binding.Handler = [Schema, Defaults, Handler = Native->Handler](const FMCPToolArguments& Arguments, FMCPToolCompletion Complete)

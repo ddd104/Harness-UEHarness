@@ -32,6 +32,17 @@
       }
     },
     {
+      "name": "bsharness.blueprint.variables",
+      "handler": "blueprint.variables",
+      "description": "读取 /Game 蓝图自身及可选父蓝图声明的成员变量、类型和可获得的类默认值；不会主动编译或保存。",
+      "parameters": {
+        "object_path": { "description": "蓝图资产的完整 objectPath，例如 /Game/Folder/BP_Name.BP_Name。" },
+        "include_inherited": { "description": "是否包含父蓝图声明的变量；不包含 C++ 原生属性。", "default": false },
+        "offset": { "default": 0 },
+        "limit": { "default": 100 }
+      }
+    },
+    {
       "name": "bsharness.assets.open",
       "handler": "assets.open",
       "description": "在 UE 中打开资产编辑器；已经打开时切换到该编辑器。打开关卡会切换场景，并可能提示保存。",

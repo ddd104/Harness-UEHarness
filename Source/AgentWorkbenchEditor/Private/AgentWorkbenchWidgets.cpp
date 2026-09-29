@@ -1,6 +1,7 @@
 #include "AgentWorkbenchWidgets.h"
 #include "AgentAssetContextService.h"
 #include "AgentWorkbenchSettings.h"
+#include "AgentWorkbenchDisplayFormatter.h"
 #include "AgentModelClient.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "Containers/Ticker.h"
@@ -198,26 +199,25 @@ void SAgentModelOptionsBar::RefreshModels()
 void SAgentConversationList::Construct(const FArguments& Args, TSharedRef<FAgentSession> InSession)
 {
     Session = InSession;
+    VisibleMessages = FAgentWorkbenchDisplayFormatter::VisibleConversationMessages(Session->Messages);
     ChildSlot [ SNew(SBorder).Padding(8) [ SNew(SVerticalBox)
         + SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 6) [ SNew(STextBlock).Text(LOCTEXT("Conversation", "对话记录")) ]
         + SVerticalBox::Slot().FillHeight(1) [ SAssignNew(List, SListView<TSharedPtr<FAgentMessage>>)
-            .ListItemsSource(&Session->Messages).OnGenerateRow(this, &SAgentConversationList::MakeRow) ]
+            .ListItemsSource(&VisibleMessages).OnGenerateRow(this, &SAgentConversationList::MakeRow) ]
     ] ];
 }
 
-void SAgentConversationList::Refresh() { if (List) { List->RequestListRefresh(); List->ScrollToBottom(); } }
+void SAgentConversationList::Refresh()
+{
+    VisibleMessages = FAgentWorkbenchDisplayFormatter::VisibleConversationMessages(Session->Messages);
+    if (List) { List->RequestListRefresh(); List->ScrollToBottom(); }
+}
 
 TSharedRef<ITableRow> SAgentConversationList::MakeRow(TSharedPtr<FAgentMessage> Item, const TSharedRef<STableViewBase>& Owner)
 {
-    const TCHAR* Role = Item->Role == EAgentMessageRole::User ? TEXT("用户")
-        : Item->Role == EAgentMessageRole::Error ? TEXT("错误") : TEXT("Agent");
-    FString Body = Item->Text;
-    for (const FAgentCandidate& Candidate : Item->IncludedAssets)
-    {
-        Body += FString::Printf(TEXT("\n[本轮候选] %s"), *Candidate.ObjectPath);
-    }
+    const TCHAR* Role = Item->Role == EAgentMessageRole::User ? TEXT("用户") : TEXT("Agent");
     return SNew(STableRow<TSharedPtr<FAgentMessage>>, Owner) [ SNew(SBorder).Padding(6) [
-        SNew(STextBlock).Text(FText::FromString(FString::Printf(TEXT("%s\n%s"), Role, *Body))).AutoWrapText(true)
+        SNew(STextBlock).Text(FText::FromString(FString::Printf(TEXT("%s\n%s"), Role, *Item->Text))).AutoWrapText(true)
     ] ];
 }
 
@@ -321,12 +321,17 @@ void SAgentExecutionPanel::Refresh() { if (List) { List->RequestListRefresh(); L
 
 TSharedRef<ITableRow> SAgentExecutionPanel::MakeRow(TSharedPtr<FAgentEvent> Item, const TSharedRef<STableViewBase>& Owner)
 {
-    const FString Label = FString::Printf(TEXT("Run %s · #%d\n%s"),
-        *Item->RunId.ToString(EGuidFormats::Digits).Left(8), Item->Sequence, *Item->Summary);
+    const FString Detail = FAgentWorkbenchDisplayFormatter::FormatEventDetail(*Item);
+    if (Detail.IsEmpty())
+    {
+        return SNew(STableRow<TSharedPtr<FAgentEvent>>, Owner) [ SNew(SBorder).Padding(6) [
+            SNew(STextBlock).Text(FText::FromString(Item->Summary)).AutoWrapText(true) ] ];
+    }
     return SNew(STableRow<TSharedPtr<FAgentEvent>>, Owner) [ SNew(SExpandableArea)
         .InitiallyCollapsed(true)
-        .HeaderContent() [ SNew(STextBlock).Text(FText::FromString(Label)).AutoWrapText(true) ]
-        .BodyContent() [ SNew(STextBlock).Text(FText::FromString(Item->Detail.IsEmpty() ? TEXT("无详细信息") : Item->Detail)).AutoWrapText(true) ]
+        .HeaderContent() [ SNew(STextBlock).Text(FText::FromString(Item->Summary)).AutoWrapText(true) ]
+        .BodyContent() [ SNew(SBox).MaxDesiredHeight(480) [ SNew(SScrollBox)
+            + SScrollBox::Slot() [ SNew(STextBlock).Text(FText::FromString(Detail)).AutoWrapText(true) ] ] ]
     ];
 }
 

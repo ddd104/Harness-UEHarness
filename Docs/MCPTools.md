@@ -1,6 +1,6 @@
 # MCP 工具模块
 
-`BSHarnessTools` 是 UE5.8 编辑器模块，将 UE 能力定义为 Model Context Protocol（MCP）工具。模块启动时读取插件的 `Config/MCPTools.json`，默认注册下面的 8 个工具。MCP 定义工具发现与调用协议，工具的具体实现由本插件提供。
+`BSHarnessTools` 是 UE5.8 编辑器模块，将 UE 能力定义为 Model Context Protocol（MCP）工具。模块启动时读取插件的 `Config/MCPTools.json`，默认注册下面的 9 个工具。MCP 定义工具发现与调用协议，工具的具体实现由本插件提供。
 
 新增已有能力的工具别名、修改说明和参数默认值、启用或禁用工具，推荐直接修改 JSON，详见 [配置注册工具](ToolConfiguration.md)。通过 `BSHarness.MCP.Reload` 重载，无需重新编译。后面的 C++ 示例保留给新增底层能力或其他模块集成时使用。
 
@@ -12,12 +12,23 @@
 | `bsharness.project_info` | 项目名称、工程文件及源码根目录 | 无 | 同步 |
 | `bsharness.assets.search` | 搜索资产，不加载资产对象 | `path`、`class_path`、`name_contains`、`recursive`、`offset`、`limit` | 同步，编辑器主线程 |
 | `bsharness.assets.get` | 查询资产名称、类型、包名及包依赖 | `object_path`，必填 | 同步，编辑器主线程 |
+| `bsharness.blueprint.variables` | 读取蓝图声明的成员变量、类型及可获得的默认值 | `object_path`（必填）、`include_inherited`、`offset`、`limit` | 同步，编辑器主线程 |
 | `bsharness.assets.open` | 加载并打开资产编辑器；已打开则切换到该窗口 | `object_path`，必填 | 同步，编辑器主线程 |
 | `bsharness.actors.list` | 查询当前编辑器场景已加载的 Actor、位置和选中状态 | `selected_only`、`name_contains`、`offset`、`limit` | 同步，编辑器主线程 |
 | `bsharness.source.list` | 列出源码文本文件 | `root`、`path`、`recursive`、`offset`、`limit` | 异步，后台文件查询 |
 | `bsharness.source.read` | 分行读取源码 | `root`、`path`（必填）、`start_line`、`max_lines` | 异步，后台文件读取 |
 
 参数名区分大小写，不允许未知参数或隐式类型转换。`tools/list` 返回每个工具的参数 Schema。
+
+## Agent Workbench 中的 UE MCP 工具
+
+Agent Workbench 除了读取上面的 `BSHarnessTools` 注册表，还在编辑器运行时发现 UE5.8 `ToolsetRegistry` 和独立注册的 MCP 工具。只会发现**已加载并启用**的工具；安装在引擎目录中但没有启用的工具集不会自动加载。每次发送会冻结当时可用的工具和处理器身份；运行中卸载或重新注册的工具需要在新一轮对话中重新发现。
+
+当前工程已在 `UEHarness.uproject` 为 Editor 目标启用 `AllToolsets`，并单独启用它未覆盖的 `ChaosClothAssetToolset`、`LiveCodingToolset`、`MetaHumanGenerator`、`MVVMToolset`、`SequencerAnimMixerToolset`，共覆盖本机安装的 26 个工具集插件。独立 DebugGame 编辑器的运行时目录发现 876 个可调用 UE MCP 工具，包括 `BlueprintTools.list_variables`；具体数量会随插件加载、设置和 UE 版本变化。正在运行的编辑器需要重新启动才能载入新插件和桥接代码。
+
+模型可使用 `ue_mcp.catalog.search` 搜索本轮冻结的工具目录，使用 `ue_mcp.catalog.describe` 读取某个工具的参数 Schema，再通过 `ue_mcp.call_tool` 传入目录返回的 `registry_name` 与 `arguments` 调用。模型请求中只发送这三个目录与调用入口，不一次性附带全部 UE 工具 Schema。完整目录保留在当前 Run 快照的内存中；历史记录保存实际工具调用与结果，不保存完整工具名单或处理器映射。目录查询不会调用引擎工具；每一次实际 UE MCP 工具调用都要在编辑器窗口中核对工具全名与参数并明确允许。无人值守运行时默认拒绝。审批只适用于本次调用；工具身份或 Schema 变化后不会沿用旧批准。
+
+UE `ToolsetRegistry` 的执行接口没有通用取消或回滚能力。调用超时或用户停止后，Workbench 会忽略迟到结果，但已经开始的工具仍可能继续执行。对具有副作用的工具，应查看实际项目状态再决定是否重试。
 
 - 资产搜索默认 `path=/Game`，递归查询；`class_path` 是精确类型，例如 `/Script/Engine.Material`，不包含派生类型。资产名与 Actor 标签的子串匹配不区分大小写。
 - 分页默认 `offset=0`、`limit=100`，`limit` 范围为 1–500。返回 `items`、`total`、`hasMore`，有后续页时提供 `nextOffset`。翻页期间如果编辑器数据发生变化，结果可能随之改变。
@@ -236,7 +247,7 @@ Future.Next([](FMCPToolResult Result)
 Automation RunTests BSHarness.MCP
 ```
 
-或者在 Session Frontend 的 Automation 页面搜索 `BSHarness.MCP`，选择全部测试并运行。共 12 项测试，覆盖注册、同步与异步调用、超时、关闭、协议分发、内置查询、控制台入口、实际打开和复用资产编辑器，以及配置默认值、失败重载回退和重载时的异步调用。内置工具测试以随插件提供的 8 个默认工具配置为基准；若禁用、改名或修改这些工具的默认行为，请先恢复默认配置再运行完整回归测试。配置测试使用独立注册表，不改写磁盘配置。资产测试只创建内存中的临时曲线资产，结束后清理，不写入项目资产文件。
+或者在 Session Frontend 的 Automation 页面搜索 `BSHarness.MCP`，选择全部测试并运行。测试覆盖注册、同步与异步调用、超时、关闭、协议分发、内置查询、控制台入口、实际打开和复用资产编辑器，以及配置默认值、失败重载回退和重载时的异步调用。内置工具测试以随插件提供的 9 个默认工具配置为基准；若禁用、改名或修改这些工具的默认行为，请先恢复默认配置再运行完整回归测试。配置测试使用独立注册表，不改写磁盘配置。资产测试只创建内存中的临时曲线资产，结束后清理，不写入项目资产文件。
 
 本机 PowerShell 编译命令：
 
@@ -250,7 +261,7 @@ Automation RunTests BSHarness.MCP
 & 'F:\EPIC\Engine58WithPDB\Engine\Windows\Engine\Binaries\Win64\UnrealEditor-Cmd.exe' 'F:\UE5Project\UEHarness\UEHarness.uproject' '-ExecCmds=Automation RunTests BSHarness.MCP' '-TestExit=Automation Test Queue Empty' '-ReportExportPath=F:\UE5Project\UEHarness\Saved\Automation\BSHarnessMCP' '-abslog=F:\UE5Project\UEHarness\Saved\Logs\BSHarnessMCPTests.log' -unattended -nullrhi -nosound -nop4 -nosplash
 ```
 
-检查 `Saved/Automation/BSHarnessMCP/index.json` 中 `succeeded=12`、`failed=0`、`notRun=0`，并查看 `Saved/Logs/BSHarnessMCPTests.log`。不能只看进程退出码；引擎有时在测试失败后仍返回 0。换机器时替换上述引擎路径与工程路径。
+检查 `Saved/Automation/BSHarnessMCP/index.json` 中的 `succeeded`、`failed`、`notRun` 实际计数，并查看 `Saved/Logs/BSHarnessMCPTests.log`。不能只看进程退出码；引擎有时在测试失败后仍返回 0。换机器时替换上述引擎路径与工程路径。
 
 
 ### 编辑器运行时验证新增处理器
