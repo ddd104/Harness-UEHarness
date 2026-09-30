@@ -608,7 +608,7 @@ bool FAgentModelClient::Start(const TSharedRef<FAgentSession>& Session, const FG
     const FString BodyText = SerializeJson(Body.ToSharedRef());
     const FGuid RunId = Snapshot.RunId;
     Session->AddEvent(EAgentEventType::ModelRequestStarted, RunId,
-        FString::Printf(TEXT("请求 %s / %s"), *Snapshot.Provider, *Snapshot.ModelOptions.Model), BodyText);
+        FString::Printf(TEXT("模型输入 · 请求 %s / %s"), *Snapshot.Provider, *Snapshot.ModelOptions.Model), BodyText);
     Session->Touch();
     TSharedRef<IHttpRequest, ESPMode::ThreadSafe> Request = FHttpModule::Get().CreateRequest();
     Request->SetURL(Url);
@@ -639,21 +639,30 @@ bool FAgentModelClient::Start(const TSharedRef<FAgentSession>& Session, const FG
                 || Current->Runner.Phase != EAgentRunPhase::RequestingModel
                 || Current->Runner.CurrentRunId != RunId
                 || Current->Runner.CurrentRequestId != RequestId) { return; }
+            FString SafeResponse = ResponseText;
+            if (!ApiKey.IsEmpty()) { SafeResponse.ReplaceInline(*ApiKey, TEXT("[redacted]")); }
             if (!bSucceeded || Status < 200 || Status >= 300)
             {
-                FString SafeResponse = ResponseText.Left(1000);
-                if (!ApiKey.IsEmpty()) { SafeResponse.ReplaceInline(*ApiKey, TEXT("[redacted]")); }
-                Current->FailRun(RunId, FString::Printf(TEXT("模型请求失败（HTTP %d）：%s"), Status, *SafeResponse));
+                if (!SafeResponse.IsEmpty())
+                {
+                    Current->AddEvent(EAgentEventType::ModelRequestCompleted, RunId,
+                        FString::Printf(TEXT("模型输出 · HTTP %d"), Status), SafeResponse);
+                    Current->Touch();
+                }
+                Current->FailRun(RunId, FString::Printf(TEXT("模型请求失败（HTTP %d）：%s"), Status, *SafeResponse.Left(1000)));
                 return;
             }
             FString Reply, ParseError;
             TArray<FAgentToolCall> Calls;
             if (!ParseResponse(Provider, ResponseText, RequestId, Aliases, Reply, Calls, ParseError))
             {
+                Current->AddEvent(EAgentEventType::ModelRequestCompleted, RunId,
+                    TEXT("模型输出 · 解析失败"), SafeResponse);
+                Current->Touch();
                 Current->FailRun(RunId, ParseError);
                 return;
             }
-            Current->OnModelResponse(RunId, RequestId, Reply, Calls);
+            Current->OnModelResponse(RunId, RequestId, Reply, Calls, SafeResponse);
         });
     });
     Session->Runner.ActiveRequest = Request;

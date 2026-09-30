@@ -187,6 +187,8 @@ TArray<TSharedPtr<FAgentExecutionNode>> FAgentExecutionTreeModel::Build(const FA
         }
         if (DisplayDetail.IsEmpty() && Event->Type == EAgentEventType::ModelRequestStarted)
         { DisplayDetail = TEXT("详情未保存，无法还原完整模型调用输入。"); }
+        if (DisplayDetail.IsEmpty() && Event->Type == EAgentEventType::ModelRequestCompleted)
+        { DisplayDetail = TEXT("详情未保存，无法还原完整模型调用输出。"); }
         if (!DisplayDetail.IsEmpty())
         {
             TSharedPtr<FAgentExecutionNode> Detail = MakeShared<FAgentExecutionNode>();
@@ -401,8 +403,9 @@ bool FAgentExecutionTreeHistoricalDetailsTest::RunTest(const FString& Parameters
         DetailAt(Roots[1]->Children[0]), FString(TEXT("{\"query\":\"other run\"}")));
     TestEqual(TEXT("Other run with the same tool has its own result"),
         DetailAt(Roots[1]->Children[1]), FString(TEXT("{\"result\":\"other run\"}")));
-    TestTrue(TEXT("An empty model proposal has no invented detail"),
-        Roots[0]->Children[5]->Children.IsEmpty());
+    TestEqual(TEXT("Unavailable model output is stated accurately"),
+        DetailAt(Roots[0]->Children[5]),
+        FString(TEXT("详情未保存，无法还原完整模型调用输出。")));
     TestTrue(TEXT("A no-payload completion has no empty detail"),
         Roots[0]->Children[6]->Children.IsEmpty());
     TestTrue(TEXT("A legacy event cannot borrow another Run's arguments"),

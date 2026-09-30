@@ -146,7 +146,8 @@ public:
     void CompleteRun(const FGuid& RunId, const FString& Reply);
     void FailRun(const FGuid& RunId, const FString& Error);
     void OnModelResponse(const FGuid& RunId, const FGuid& RequestId,
-        const FString& ReplyText, const TArray<FAgentToolCall>& ToolCalls);
+        const FString& ReplyText, const TArray<FAgentToolCall>& ToolCalls,
+        const FString& ResponseText);
     void ExecuteNextTool(const FGuid& RunId);
     void OnToolResult(const FGuid& RunId, const FString& ToolCallId, const FString& ToolName,
         const FString& ResultText);

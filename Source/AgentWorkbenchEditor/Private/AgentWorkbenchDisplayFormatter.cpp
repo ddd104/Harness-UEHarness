@@ -259,6 +259,7 @@ FString FAgentWorkbenchDisplayFormatter::FormatEventDetail(const FAgentEvent& Ev
     switch (Event.Type)
     {
     case EAgentEventType::ModelRequestStarted: Writer.AppendLine(TEXT("模型调用输入")); break;
+    case EAgentEventType::ModelRequestCompleted: Writer.AppendLine(TEXT("模型调用输出")); break;
     case EAgentEventType::ToolCallStarted: Writer.AppendLine(TEXT("工具调用参数")); break;
     case EAgentEventType::ToolCallCompleted: Writer.AppendLine(TEXT("工具调用结果")); break;
     default: break;
@@ -321,6 +322,12 @@ bool FAgentWorkbenchDisplayFormatterTest::RunTest(const FString& Parameters)
     Request.Detail = TEXT(R"({"content":"first\nsecond\tcolumn","url":"https:\/\/example.com\/a"})");
     const FString RequestDisplay = FAgentWorkbenchDisplayFormatter::FormatEventDetail(Request);
     TestTrue(TEXT("Request is labeled"), RequestDisplay.Contains(TEXT("模型调用输入")));
+    FAgentEvent Response;
+    Response.Type = EAgentEventType::ModelRequestCompleted;
+    Response.Detail = TEXT(R"({"choices":[{"message":{"content":null,"tool_calls":[{"id":"call_1"}]}}]})");
+    const FString ResponseDisplay = FAgentWorkbenchDisplayFormatter::FormatEventDetail(Response);
+    TestTrue(TEXT("Tool-only model output is labeled"), ResponseDisplay.Contains(TEXT("模型调用输出")));
+    TestTrue(TEXT("Tool-only model output includes its call"), ResponseDisplay.Contains(TEXT("call_1")));
     TestTrue(TEXT("JSON newline decoded"), RequestDisplay.Contains(TEXT("first\n  second")));
     TestTrue(TEXT("JSON tab shown as spaces"), RequestDisplay.Contains(TEXT("second    column")));
     TestTrue(TEXT("JSON slash decoded"), RequestDisplay.Contains(TEXT("https://example.com/a")));

@@ -194,7 +194,6 @@ void FAgentSession::CompleteRun(const FGuid& RunId, const FString& ReplyText)
     Reply->Text = ReplyText;
     Reply->RunId = RunId;
     Messages.Add(Reply);
-    AddEvent(EAgentEventType::ModelRequestCompleted, RunId, TEXT("模型已回复"), Reply->Text);
     Runner.State = EAgentRunState::Completed;
     AddEvent(EAgentEventType::RunCompleted, RunId, TEXT("任务完成"));
     Touch();
@@ -222,7 +221,8 @@ void FAgentSession::FailRun(const FGuid& RunId, const FString& Error)
 }
 
 void FAgentSession::OnModelResponse(const FGuid& RunId, const FGuid& RequestId,
-    const FString& ReplyText, const TArray<FAgentToolCall>& ToolCalls)
+    const FString& ReplyText, const TArray<FAgentToolCall>& ToolCalls,
+    const FString& ResponseText)
 {
     check(IsInGameThread());
     if (Runner.State != EAgentRunState::Running || Runner.Phase != EAgentRunPhase::RequestingModel
@@ -230,6 +230,11 @@ void FAgentSession::OnModelResponse(const FGuid& RunId, const FGuid& RequestId,
     Runner.ActiveRequest.Reset();
     if (FPlatformTime::Seconds() >= Runner.RunDeadlineSeconds)
     { FailRun(RunId, TEXT("Run exceeded its total timeout.")); return; }
+    AddEvent(EAgentEventType::ModelRequestCompleted, RunId,
+        ToolCalls.IsEmpty() ? TEXT("模型输出 · 回复")
+            : FString::Printf(TEXT("模型输出 · 提出 %d 个工具调用"), ToolCalls.Num()),
+        ResponseText);
+    Touch();
     if (ToolCalls.IsEmpty())
     {
         if (ReplyText.TrimStartAndEnd().IsEmpty())
@@ -258,8 +263,6 @@ void FAgentSession::OnModelResponse(const FGuid& RunId, const FGuid& RequestId,
     Proposal->Text = ReplyText;
     Proposal->ToolCalls = ToolCalls;
     Messages.Add(Proposal);
-    AddEvent(EAgentEventType::ModelRequestCompleted, RunId,
-        FString::Printf(TEXT("模型提出 %d 个工具调用"), ToolCalls.Num()), ReplyText);
     Runner.Phase = EAgentRunPhase::ProcessingTools;
     Runner.PendingToolCalls = ToolCalls;
     Runner.NextToolCallIndex = 0;

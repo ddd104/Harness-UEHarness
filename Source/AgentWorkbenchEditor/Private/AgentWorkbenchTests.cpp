@@ -41,7 +41,7 @@ bool FAgentWorkbenchSessionIsolationTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("A run has its own ID"), A.Runner.CurrentRunId.IsValid());
     TestFalse(TEXT("B has no run"), B.Runner.CurrentRunId.IsValid());
     TestEqual(TEXT("A run completed"), A.Runner.State, EAgentRunState::Completed);
-    TestEqual(TEXT("A records structured events"), A.Events.Num(), 3);
+    TestEqual(TEXT("A records structured events"), A.Events.Num(), 2);
     FAgentSession Cancelled;
     Cancelled.DraftText = TEXT("Stop this request");
     TestTrue(TEXT("Cancellation fixture starts"), Cancelled.BeginRun(Error));
@@ -50,6 +50,37 @@ bool FAgentWorkbenchSessionIsolationTest::RunTest(const FString& Parameters)
     Cancelled.CompleteRun(CancelledRunId, TEXT("Late response"));
     TestEqual(TEXT("Cancelled run ignores late response"), Cancelled.Runner.State, EAgentRunState::Cancelled);
     TestEqual(TEXT("No fabricated late assistant message"), Cancelled.Messages.Num(), 1);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAgentWorkbenchModelResponseDetailTest,
+    "AgentWorkbench.Display.ModelResponsePayload",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAgentWorkbenchModelResponseDetailTest::RunTest(const FString& Parameters)
+{
+    FAgentSession Session;
+    Session.DraftText = TEXT("Show the model response");
+    FString Error;
+    if (!TestTrue(TEXT("Run starts"), Session.BeginRun(Error))) { return false; }
+    const FGuid RunId = Session.Runner.CurrentRunId;
+    const FGuid RequestId = FGuid::NewGuid();
+    Session.Runner.CurrentRequestId = RequestId;
+    Session.Runner.Phase = EAgentRunPhase::RequestingModel;
+    const FString RawResponse = TEXT(R"({"choices":[{"message":{"content":"answer"}}]})");
+    Session.OnModelResponse(RunId, RequestId, TEXT("answer"), {}, RawResponse);
+    TestEqual(TEXT("Run completed"), Session.Runner.State, EAgentRunState::Completed);
+    int32 ResponseEvents = 0;
+    for (const TSharedPtr<FAgentEvent>& Event : Session.Events)
+    {
+        if (Event && Event->Type == EAgentEventType::ModelRequestCompleted)
+        {
+            ++ResponseEvents;
+            TestEqual(TEXT("Raw model response is available in execution detail"),
+                Event->Detail, RawResponse);
+        }
+    }
+    TestEqual(TEXT("Exactly one model output event"), ResponseEvents, 1);
     return true;
 }
 

@@ -402,7 +402,12 @@ void SAgentExecutionPanel::Construct(const FArguments& Args, TSharedRef<FAgentSe
     LastEventSequence = Session->Events.IsEmpty() || !Session->Events.Last()
         ? INDEX_NONE : Session->Events.Last()->Sequence;
     for (const TSharedPtr<FAgentExecutionNode>& Root : Roots)
-    { if (Root) { KnownRunKeys.Add(NodeKey(*Root)); } }
+    {
+        if (!Root) { continue; }
+        KnownRunKeys.Add(NodeKey(*Root));
+        for (const TSharedPtr<FAgentExecutionNode>& Step : Root->Children)
+        { if (Step) { KnownStepKeys.Add(NodeKey(*Step)); } }
+    }
     if (!Roots.IsEmpty() && Roots.Last()) { ExpandedNodeKeys.Add(NodeKey(*Roots.Last())); }
     // Keep the list width stable as details make the vertical scrollbar necessary.
     TSharedRef<SScrollBar> ExecutionScrollBar = SNew(SScrollBar)
@@ -478,7 +483,17 @@ void SAgentExecutionPanel::Refresh()
         Tree->SetItemExpansion(Root, ExpandedNodeKeys.Contains(RootKey));
         for (const TSharedPtr<FAgentExecutionNode>& Step : Root->Children)
         {
-            if (Step && ExpandedNodeKeys.Contains(NodeKey(*Step)))
+            if (!Step) { continue; }
+            const FString StepKey = NodeKey(*Step);
+            if (!KnownStepKeys.Contains(StepKey))
+            {
+                KnownStepKeys.Add(StepKey);
+                if (Step->Event && !Step->Children.IsEmpty()
+                    && (Step->Event->Type == EAgentEventType::ModelRequestStarted
+                        || Step->Event->Type == EAgentEventType::ModelRequestCompleted))
+                { ExpandedNodeKeys.Add(StepKey); }
+            }
+            if (ExpandedNodeKeys.Contains(StepKey))
             { Tree->SetItemExpansion(Step, true); }
         }
     }

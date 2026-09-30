@@ -92,6 +92,7 @@ private:
     TSharedPtr<STreeView<TSharedPtr<FAgentExecutionNode>>> Tree;
     TArray<TSharedPtr<FAgentExecutionNode>> Roots;
     TSet<FString> KnownRunKeys;
+    TSet<FString> KnownStepKeys;
     TSet<FString> ExpandedNodeKeys;
     int32 LastEventCount = INDEX_NONE;
     int32 LastEventSequence = INDEX_NONE;
