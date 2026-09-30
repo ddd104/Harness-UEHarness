@@ -610,6 +610,14 @@ bool FAgentModelClient::Start(const TSharedRef<FAgentSession>& Session, const FG
     Session->AddEvent(EAgentEventType::ModelRequestStarted, RunId,
         FString::Printf(TEXT("模型输入 · 请求 %s / %s"), *Snapshot.Provider, *Snapshot.ModelOptions.Model), BodyText);
     Session->Touch();
+    if (Session->Runner.State != EAgentRunState::Running
+        || Session->Runner.Phase != EAgentRunPhase::RequestingModel
+        || Session->Runner.CurrentRunId != RunId
+        || Session->Runner.CurrentRequestId != RequestId)
+    {
+        OutError = TEXT("模型请求已取消。");
+        return false;
+    }
     TSharedRef<IHttpRequest, ESPMode::ThreadSafe> Request = FHttpModule::Get().CreateRequest();
     Request->SetURL(Url);
     Request->SetVerb(TEXT("POST"));

@@ -17,6 +17,11 @@
 			"LoadingPhase": "Default"
 		},
 		{
+			"Name": "BSHarnessHooks",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
+		},
+		{
 			"Name": "BSHarness",
 			"Type": "Editor",
 			"LoadingPhase": "Default"

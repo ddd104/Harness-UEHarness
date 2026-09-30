@@ -133,6 +133,7 @@ public:
     TArray<TSharedPtr<FAgentCandidate>> Candidates;
     TArray<FAgentRunInputSnapshot> RunHistory;
     FAgentRunner Runner;
+    bool bPromptHookActive = false;
     int32 NextEventSequence = 1;
     TFunction<void(const FAgentSession&)> OnChanged;
     FSimpleMulticastDelegate OnUiChanged;
@@ -144,7 +145,7 @@ public:
     bool BeginRun(FString& OutError);
     bool Send(FString& OutError);
     void CompleteRun(const FGuid& RunId, const FString& Reply);
-    void FailRun(const FGuid& RunId, const FString& Error);
+    void FailRun(const FGuid& RunId, const FString& Error, bool bTimedOut = false);
     void OnModelResponse(const FGuid& RunId, const FGuid& RequestId,
         const FString& ReplyText, const TArray<FAgentToolCall>& ToolCalls,
         const FString& ResponseText);

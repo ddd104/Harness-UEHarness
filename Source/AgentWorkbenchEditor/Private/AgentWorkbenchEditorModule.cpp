@@ -1,4 +1,5 @@
 #include "AgentWorkbenchSession.h"
+#include "AgentToolWorkflow.h"
 #include "Framework/Commands/UIAction.h"
 #include "Modules/ModuleManager.h"
 #include "Styling/AppStyle.h"
@@ -12,6 +13,7 @@ class FAgentWorkbenchEditorModule : public IModuleInterface
 public:
     virtual void StartupModule() override
     {
+        RegisterAgentWorkbenchToolHooks();
         SessionManager = MakeShared<FAgentSessionManager>();
         MenuStartupHandle = UToolMenus::RegisterStartupCallback(
             FSimpleMulticastDelegate::FDelegate::CreateRaw(this, &FAgentWorkbenchEditorModule::RegisterMenus));
@@ -22,6 +24,7 @@ public:
         UToolMenus::UnRegisterStartupCallback(MenuStartupHandle);
         UToolMenus::UnregisterOwner(this);
         if (SessionManager) { SessionManager->Shutdown(); SessionManager.Reset(); }
+        UnregisterAgentWorkbenchToolHooks();
     }
 
 private:

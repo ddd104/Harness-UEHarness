@@ -216,3 +216,10 @@
 
 - 模型请求步骤明确标为“模型输入”，每个模型响应记录脱敏后的原始响应为“模型输出”，包括仅有工具调用、解析失败及带响应正文的 HTTP 失败。新产生的模型输入和输出步骤在执行详情中自动展开，手动收起后不会因刷新再次自动展开；旧历史没有保存详情时明确说明无法还原完整输入或输出。保留 `bPersistDetailedPayloads=false` 的默认隐私设置，不补写旧历史的原始网络正文。
 - Development 在图形编辑器运行期间以 `-NoLink` 完成源码编译；独立 DebugGame 完整编译链接通过。DebugGame 命令行 `AgentWorkbench.Display` 报告 `Saved/Automation/AgentWorkbenchModelDetailsFinal/index.json` 为 6/6，`AgentWorkbench.P1.SessionIsolation` 报告 `Saved/Automation/AgentWorkbenchModelSessionIsolation/index.json` 为 1/1；`git diff --check` 通过。图形编辑器内的实际展开和滚动效果尚未手工验收，当前正在运行的 Development 编辑器尚未加载新构建。
+
+## 2026-09-30 Agent Hook 扩展模块
+
+- 新增 Editor-only `BSHarnessHooks` 模块和公开注册表；提供提示词提交前后、工具审批、工具执行前后、批准后准备及 Run 退出 Hook。按优先级调用，同优先级保留注册顺序；异步工具 Hook 只接受第一次结果并回到 Game Thread，取消或关闭会丢弃挂起回调。扩展接口、触发顺序与边界见 `HOOKS.md`。
+- Agent Session 在发送快照冻结后触发提示词 Hook；扩展可拒绝或补充本轮模型上下文，不能改用户原文及 Run 身份。完成、失败、超时、取消和关闭各触发一次退出事件。工具流程由注册表调度审批、前置处理、编辑器视图准备及后置观察；审批先于可短路的前置处理，派发前再次校验冻结目标、Schema、处理器身份、参数、取消和期限。审批窗口显示完整原始 JSON；实际 UE 工具继续跨引擎帧派发。修正同步界面通知中取消 Run 后仍可能发送模型请求或继续写入工具提议的重入边界。
+- `UEHarnessEditor Win64 DebugGame -NoHotReload -NoUBA -MaxParallelActions=1` 完整编译链接成功。初次高并发构建因系统提交内存接近上限而中止，单并发重试后成功。DebugGame 命令行自动化报告：`Saved/Automation/BSHarnessHooksRegistry/index.json` 为 3/3，`Saved/Automation/AgentWorkbenchHooksVerified/index.json` 为 4/4，`Saved/Automation/AgentWorkbenchHookWorkflow/index.json` 为 8/8，均无失败；`git diff --check` 通过。
+- 当前图形 Development 编辑器仍加载旧 DLL，未重启验收新 Hook 的实际交互；动态热卸载和真实写工具场景也未在本轮手工验证。直接调用 MCP 分派器的入口不经过 Agent Workbench Hook。

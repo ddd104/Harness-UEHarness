@@ -6,6 +6,7 @@
 #include "AgentModelClient.h"
 #include "AgentToolBridge.h"
 #include "AgentToolWorkflow.h"
+#include "BSHarnessHookRegistry.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Containers/Ticker.h"
 #include "HAL/FileManager.h"
@@ -27,11 +28,13 @@ void ClearRunTimeout(FAgentRunner& Runner)
     }
 }
 
-bool StartModelRequest(const TSharedRef<FAgentSession>& Session, FString& OutError)
+bool StartModelRequest(const TSharedRef<FAgentSession>& Session, FString& OutError, bool& bTimedOut)
 {
     check(IsInGameThread());
+    bTimedOut = false;
     if (FPlatformTime::Seconds() >= Session->Runner.RunDeadlineSeconds)
     {
+        bTimedOut = true;
         OutError = TEXT("Run exceeded its total timeout.");
         return false;
     }
@@ -39,6 +42,17 @@ bool StartModelRequest(const TSharedRef<FAgentSession>& Session, FString& OutErr
     Session->Runner.CurrentRequestId = FGuid::NewGuid();
     Session->Runner.Phase = EAgentRunPhase::RequestingModel;
     return FAgentModelClient::Start(Session, Session->Runner.CurrentRequestId, OutError);
+}
+
+void NotifyRunExited(const FAgentSession& Session, const FGuid& RunId,
+    EBSHookRunExitReason Reason, const FString& Detail = FString())
+{
+    FBSHookRunExitContext Context;
+    Context.SessionId = Session.SessionId;
+    Context.RunId = RunId;
+    Context.Reason = Reason;
+    Context.Detail = Detail;
+    FBSHarnessHookRegistry::Get().EmitRunExited(Context);
 }
 }
 
@@ -77,6 +91,11 @@ void FAgentRunner::Cancel()
 bool FAgentSession::BeginRun(FString& OutError)
 {
     check(IsInGameThread());
+    if (bPromptHookActive)
+    {
+        OutError = TEXT("A prompt submission hook is already running for this session.");
+        return false;
+    }
     if (Runner.State == EAgentRunState::Running)
     {
         OutError = TEXT("当前会话已有运行中的任务。");
@@ -122,6 +141,46 @@ bool FAgentSession::BeginRun(FString& OutError)
     Current.Text = Snapshot.UserInput;
     Current.IncludedAssets = Snapshot.IncludedAssets;
     Snapshot.Conversation.Add(MoveTemp(Current));
+
+    FBSHookPromptContext PromptContext;
+    PromptContext.SessionId = Snapshot.SessionId;
+    PromptContext.RunId = Snapshot.RunId;
+    PromptContext.UserPrompt = Snapshot.UserInput;
+    PromptContext.ModelId = Snapshot.ModelOptions.Model;
+    for (const FAgentCandidate& Asset : Snapshot.IncludedAssets)
+    {
+        PromptContext.CandidatePaths.Add(Asset.ObjectPath);
+    }
+    const FBSHookPromptContext OriginalPrompt = PromptContext;
+    bPromptHookActive = true;
+    const bool bAccepted = FBSHarnessHookRegistry::Get().EmitPromptSubmitting(PromptContext, OutError);
+    bPromptHookActive = false;
+    if (!bAccepted)
+    {
+        if (OutError.IsEmpty()) { OutError = TEXT("Agent extension rejected the prompt."); }
+        return false;
+    }
+    if (PromptContext.SessionId != OriginalPrompt.SessionId
+        || PromptContext.RunId != OriginalPrompt.RunId
+        || PromptContext.UserPrompt != OriginalPrompt.UserPrompt
+        || PromptContext.ModelId != OriginalPrompt.ModelId
+        || PromptContext.CandidatePaths != OriginalPrompt.CandidatePaths)
+    {
+        OutError = TEXT("Agent extension changed immutable prompt information.");
+        return false;
+    }
+    constexpr int32 MaxExtensionContextChars = 16000;
+    if (PromptContext.AdditionalModelContext.Len() > MaxExtensionContextChars)
+    {
+        OutError = TEXT("Agent extension context exceeds the 16000 character limit.");
+        return false;
+    }
+    if (!PromptContext.AdditionalModelContext.TrimStartAndEnd().IsEmpty())
+    {
+        // Keep the submitted message intact; only the frozen model conversation gets context.
+        Snapshot.Conversation.Last().Text += TEXT("\n\nAgent extension context (data):\n");
+        Snapshot.Conversation.Last().Text += PromptContext.AdditionalModelContext;
+    }
     Runner.CurrentRunId = RunId;
     Runner.LastSnapshot = MakeShared<FAgentRunInputSnapshot>(MoveTemp(Snapshot));
     const FAgentRunInputSnapshot& Frozen = *Runner.LastSnapshot;
@@ -150,7 +209,11 @@ bool FAgentSession::BeginRun(FString& OutError)
     DraftText.Empty();
     AddEvent(EAgentEventType::RunStarted, RunId, TEXT("任务开始"));
     // A validated send has now started a Run, so this Session becomes history.
+    // Keep this submission single-owner if a post-submit handler calls back into the Session.
+    bPromptHookActive = true;
+    FBSHarnessHookRegistry::Get().EmitPromptSubmitted(PromptContext);
     Touch();
+    bPromptHookActive = false;
     return true;
 }
 
@@ -159,6 +222,8 @@ bool FAgentSession::Send(FString& OutError)
     if (!FAgentModelClient::Validate(*GetDefault<UAgentWorkbenchSettings>(), ModelOptions.Model, OutError)) { return false; }
     if (!BeginRun(OutError)) { return false; }
     const FGuid RunId = Runner.CurrentRunId;
+    // PromptSubmitted handlers may synchronously end the Run.
+    if (Runner.State != EAgentRunState::Running) { return true; }
     TWeakPtr<FAgentSession> WeakSession = AsShared();
     Runner.RunTimeoutHandle = FTSTicker::GetCoreTicker().AddTicker(
         FTickerDelegate::CreateLambda([WeakSession, RunId](float)
@@ -168,13 +233,14 @@ bool FAgentSession::Send(FString& OutError)
                 && Current->Runner.CurrentRunId == RunId)
             {
                 Current->Runner.RunTimeoutHandle.Reset();
-                Current->FailRun(RunId, TEXT("Run exceeded its total timeout."));
+                Current->FailRun(RunId, TEXT("Run exceeded its total timeout."), true);
             }
             return false;
         }), static_cast<float>(Runner.LastSnapshot->RunTimeoutSeconds));
-    if (!StartModelRequest(AsShared(), OutError))
+    bool bTimedOut = false;
+    if (!StartModelRequest(AsShared(), OutError, bTimedOut))
     {
-        FailRun(Runner.CurrentRunId, OutError);
+        FailRun(Runner.CurrentRunId, OutError, bTimedOut);
         return true;
     }
     return true;
@@ -197,9 +263,10 @@ void FAgentSession::CompleteRun(const FGuid& RunId, const FString& ReplyText)
     Runner.State = EAgentRunState::Completed;
     AddEvent(EAgentEventType::RunCompleted, RunId, TEXT("任务完成"));
     Touch();
+    NotifyRunExited(*this, RunId, EBSHookRunExitReason::Completed);
 }
 
-void FAgentSession::FailRun(const FGuid& RunId, const FString& Error)
+void FAgentSession::FailRun(const FGuid& RunId, const FString& Error, bool bTimedOut)
 {
     check(IsInGameThread());
     if (Runner.State != EAgentRunState::Running || Runner.CurrentRunId != RunId) { return; }
@@ -218,6 +285,8 @@ void FAgentSession::FailRun(const FGuid& RunId, const FString& Error)
     Messages.Add(Failure);
     AddEvent(EAgentEventType::RunFailed, RunId, TEXT("任务失败"), Error);
     Touch();
+    NotifyRunExited(*this, RunId,
+        bTimedOut ? EBSHookRunExitReason::TimedOut : EBSHookRunExitReason::Failed, Error);
 }
 
 void FAgentSession::OnModelResponse(const FGuid& RunId, const FGuid& RequestId,
@@ -229,12 +298,16 @@ void FAgentSession::OnModelResponse(const FGuid& RunId, const FGuid& RequestId,
         || Runner.CurrentRunId != RunId || Runner.CurrentRequestId != RequestId) { return; }
     Runner.ActiveRequest.Reset();
     if (FPlatformTime::Seconds() >= Runner.RunDeadlineSeconds)
-    { FailRun(RunId, TEXT("Run exceeded its total timeout.")); return; }
+    { FailRun(RunId, TEXT("Run exceeded its total timeout."), true); return; }
     AddEvent(EAgentEventType::ModelRequestCompleted, RunId,
         ToolCalls.IsEmpty() ? TEXT("模型输出 · 回复")
             : FString::Printf(TEXT("模型输出 · 提出 %d 个工具调用"), ToolCalls.Num()),
         ResponseText);
     Touch();
+    if (Runner.State != EAgentRunState::Running
+        || Runner.Phase != EAgentRunPhase::RequestingModel
+        || Runner.CurrentRunId != RunId
+        || Runner.CurrentRequestId != RequestId) { return; }
     if (ToolCalls.IsEmpty())
     {
         if (ReplyText.TrimStartAndEnd().IsEmpty())
@@ -276,12 +349,13 @@ void FAgentSession::ExecuteNextTool(const FGuid& RunId)
     if (Runner.State != EAgentRunState::Running || Runner.Phase != EAgentRunPhase::ProcessingTools
         || Runner.CurrentRunId != RunId) { return; }
     if (FPlatformTime::Seconds() >= Runner.RunDeadlineSeconds)
-    { FailRun(RunId, TEXT("Run exceeded its total timeout.")); return; }
+    { FailRun(RunId, TEXT("Run exceeded its total timeout."), true); return; }
     if (Runner.NextToolCallIndex >= Runner.PendingToolCalls.Num())
     {
         Runner.PendingToolCalls.Empty();
         FString Error;
-        if (!StartModelRequest(AsShared(), Error)) { FailRun(RunId, Error); }
+        bool bTimedOut = false;
+        if (!StartModelRequest(AsShared(), Error, bTimedOut)) { FailRun(RunId, Error, bTimedOut); }
         return;
     }
     const FAgentToolCall Call = Runner.PendingToolCalls[Runner.NextToolCallIndex];
@@ -292,7 +366,7 @@ void FAgentSession::ExecuteNextTool(const FGuid& RunId)
     Touch();
     const double Remaining = Runner.RunDeadlineSeconds - FPlatformTime::Seconds();
     const double Timeout = FMath::Min<double>(Runner.LastSnapshot->ToolTimeoutSeconds, Remaining);
-    if (Timeout <= 0.0) { FailRun(RunId, TEXT("Run exceeded its total timeout.")); return; }
+    if (Timeout <= 0.0) { FailRun(RunId, TEXT("Run exceeded its total timeout."), true); return; }
     const FAgentToolInvocation Invocation{Runner.LastSnapshot.ToSharedRef(),
         Runner.CancellationToken.ToSharedRef(), Runner.CurrentRequestId, Call,
         Runner.RunDeadlineSeconds};
@@ -350,11 +424,14 @@ void FAgentSession::OnToolResult(const FGuid& RunId, const FString& ToolCallId,
 
 void FAgentSession::CancelRun()
 {
+    check(IsInGameThread());
     if (Runner.State == EAgentRunState::Running)
     {
+        const FGuid RunId = Runner.CurrentRunId;
         Runner.Cancel();
-        AddEvent(EAgentEventType::RunCancelled, Runner.CurrentRunId, TEXT("Run cancelled"));
+        AddEvent(EAgentEventType::RunCancelled, RunId, TEXT("Run cancelled"));
         Touch();
+        NotifyRunExited(*this, RunId, EBSHookRunExitReason::Cancelled);
     }
 }
 
@@ -639,7 +716,12 @@ void FAgentSessionManager::Shutdown()
         // Interrupted on startup. Do not create a fresh UDeveloperSettings CDO while
         // editor modules and UObject classes are being torn down.
         Session->OnChanged = nullptr;
-        Session->Runner.Cancel();
+        if (Session->Runner.State == EAgentRunState::Running)
+        {
+            const FGuid RunId = Session->Runner.CurrentRunId;
+            Session->Runner.Cancel();
+            NotifyRunExited(*Session, RunId, EBSHookRunExitReason::Closed);
+        }
     }
     for (auto& Pair : Windows)
     {

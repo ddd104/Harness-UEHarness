@@ -1,6 +1,8 @@
 #include "AgentWorkbenchSession.h"
 #include "AgentWorkbenchHistory.h"
+#include "AgentModelClient.h"
 #include "AgentWorkbenchSettings.h"
+#include "BSHarnessHookRegistry.h"
 #include "Misc/AutomationTest.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Widgets/SWindow.h"
@@ -50,6 +52,197 @@ bool FAgentWorkbenchSessionIsolationTest::RunTest(const FString& Parameters)
     Cancelled.CompleteRun(CancelledRunId, TEXT("Late response"));
     TestEqual(TEXT("Cancelled run ignores late response"), Cancelled.Runner.State, EAgentRunState::Cancelled);
     TestEqual(TEXT("No fabricated late assistant message"), Cancelled.Messages.Num(), 1);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAgentWorkbenchPromptHookLifecycleTest,
+    "AgentWorkbench.Hooks.PromptLifecycle",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAgentWorkbenchPromptHookLifecycleTest::RunTest(const FString& Parameters)
+{
+    FBSHarnessHookRegistry& Hooks = FBSHarnessHookRegistry::Get();
+    int32 SubmittedCount = 0;
+    const FBSHookHandle BeforeHandle = Hooks.RegisterPromptSubmitting(
+        FName(TEXT("AgentWorkbench.Test.PromptSubmitting")), 0,
+        [](FBSHookPromptContext& Context, FString& OutReason)
+        {
+            if (Context.UserPrompt == TEXT("reject me"))
+            {
+                OutReason = TEXT("Rejected by test hook");
+                return false;
+            }
+            if (Context.UserPrompt == TEXT("tamper")) { Context.UserPrompt = TEXT("changed"); }
+            if (Context.UserPrompt == TEXT("enrich"))
+            { Context.AdditionalModelContext = TEXT("test extension context"); }
+            return true;
+        });
+    const FBSHookHandle SubmittedHandle = Hooks.RegisterPromptSubmitted(
+        FName(TEXT("AgentWorkbench.Test.PromptSubmitted")), 0,
+        [&SubmittedCount](const FBSHookPromptContext&) { ++SubmittedCount; });
+    TestTrue(TEXT("Prompt hooks registered"), BeforeHandle.IsValid() && SubmittedHandle.IsValid());
+
+    FAgentSession Rejected;
+    Rejected.DraftText = TEXT("reject me");
+    FString Error;
+    TestFalse(TEXT("Rejected prompt does not start"), Rejected.BeginRun(Error));
+    TestEqual(TEXT("Rejection reason returned"), Error, FString(TEXT("Rejected by test hook")));
+    TestTrue(TEXT("Rejected prompt has no history"), Rejected.RunHistory.IsEmpty());
+    TestTrue(TEXT("Rejected prompt has no messages"), Rejected.Messages.IsEmpty());
+    TestEqual(TEXT("Rejected prompt keeps draft"), Rejected.DraftText, FString(TEXT("reject me")));
+
+    FAgentSession Tampered;
+    Tampered.DraftText = TEXT("tamper");
+    Error.Empty();
+    TestFalse(TEXT("Changed prompt identity is rejected"), Tampered.BeginRun(Error));
+    TestTrue(TEXT("Tampered prompt has no history"), Tampered.RunHistory.IsEmpty());
+    TestEqual(TEXT("Tampered prompt keeps draft"), Tampered.DraftText, FString(TEXT("tamper")));
+
+    FAgentSession Enriched;
+    Enriched.DraftText = TEXT("enrich");
+    Error.Empty();
+    if (TestTrue(TEXT("Enriched prompt starts"), Enriched.BeginRun(Error)))
+    {
+        TestEqual(TEXT("Submitted message stays original"), Enriched.Messages.Last()->Text,
+            FString(TEXT("enrich")));
+        TestEqual(TEXT("Snapshot input stays original"), Enriched.Runner.LastSnapshot->UserInput,
+            FString(TEXT("enrich")));
+        TestTrue(TEXT("Model conversation receives extension context"),
+            Enriched.Runner.Conversation.Last().Text.Contains(TEXT("test extension context")));
+        TestTrue(TEXT("Frozen history reflects actual model input"),
+            Enriched.RunHistory.Last().Conversation.Last().Text.Contains(TEXT("test extension context")));
+        Enriched.CancelRun();
+    }
+    TestEqual(TEXT("Only successful prompt emits submitted"), SubmittedCount, 1);
+    Hooks.Unregister(SubmittedHandle);
+    Hooks.Unregister(BeforeHandle);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAgentWorkbenchRunExitHookTest,
+    "AgentWorkbench.Hooks.RunExitOnce",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAgentWorkbenchRunExitHookTest::RunTest(const FString& Parameters)
+{
+    TArray<FBSHookRunExitContext> Exits;
+    FBSHarnessHookRegistry& Hooks = FBSHarnessHookRegistry::Get();
+    const FBSHookHandle ExitHandle = Hooks.RegisterRunExited(
+        FName(TEXT("AgentWorkbench.Test.RunExited")), 0,
+        [&Exits](const FBSHookRunExitContext& Context) { Exits.Add(Context); });
+    TestTrue(TEXT("Run exit hook registered"), ExitHandle.IsValid());
+    FString Error;
+
+    FAgentSession Completed;
+    Completed.DraftText = TEXT("complete");
+    if (TestTrue(TEXT("Completion run starts"), Completed.BeginRun(Error)))
+    {
+        Completed.CompleteRun(Completed.Runner.CurrentRunId, TEXT("done"));
+        Completed.CompleteRun(Completed.Runner.CurrentRunId, TEXT("late"));
+    }
+    FAgentSession Failed;
+    Failed.DraftText = TEXT("fail");
+    if (TestTrue(TEXT("Failure run starts"), Failed.BeginRun(Error)))
+    {
+        Failed.FailRun(Failed.Runner.CurrentRunId, TEXT("failure detail"));
+        Failed.FailRun(Failed.Runner.CurrentRunId, TEXT("late"));
+    }
+    FAgentSession TimedOut;
+    TimedOut.DraftText = TEXT("timeout");
+    if (TestTrue(TEXT("Timeout run starts"), TimedOut.BeginRun(Error)))
+    { TimedOut.FailRun(TimedOut.Runner.CurrentRunId, TEXT("deadline"), true); }
+    FAgentSession Cancelled;
+    Cancelled.DraftText = TEXT("cancel");
+    if (TestTrue(TEXT("Cancellation run starts"), Cancelled.BeginRun(Error)))
+    {
+        Cancelled.CancelRun();
+        Cancelled.CancelRun();
+    }
+
+    const FString Directory = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Automation"),
+        TEXT("AgentWorkbenchHookExit"), FGuid::NewGuid().ToString(EGuidFormats::Digits));
+    TSharedRef<FAgentSessionManager> Manager = MakeShared<FAgentSessionManager>(Directory);
+    TSharedRef<FAgentSession> Closing = Manager->CreateSession();
+    Closing->DraftText = TEXT("close");
+    TestTrue(TEXT("Closing run starts"), Closing->BeginRun(Error));
+    Manager->Shutdown();
+    Manager->Shutdown();
+
+    TestEqual(TEXT("One exit per started run"), Exits.Num(), 5);
+    if (Exits.Num() == 5)
+    {
+        TestEqual(TEXT("Completion reason"), Exits[0].Reason, EBSHookRunExitReason::Completed);
+        TestEqual(TEXT("Failure reason"), Exits[1].Reason, EBSHookRunExitReason::Failed);
+        TestEqual(TEXT("Failure detail"), Exits[1].Detail, FString(TEXT("failure detail")));
+        TestEqual(TEXT("Timeout reason"), Exits[2].Reason, EBSHookRunExitReason::TimedOut);
+        TestEqual(TEXT("Cancellation reason"), Exits[3].Reason, EBSHookRunExitReason::Cancelled);
+        TestEqual(TEXT("Shutdown reason"), Exits[4].Reason, EBSHookRunExitReason::Closed);
+        TestEqual(TEXT("Shutdown run identity"), Exits[4].RunId, Closing->Runner.CurrentRunId);
+    }
+    Hooks.Unregister(ExitHandle);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAgentWorkbenchHookResponseCancellationTest,
+    "AgentWorkbench.Hooks.ResponseCancellation",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAgentWorkbenchHookResponseCancellationTest::RunTest(const FString& Parameters)
+{
+    FAgentSession Session;
+    Session.DraftText = TEXT("response cancellation");
+    FString Error;
+    if (!TestTrue(TEXT("Run starts"), Session.BeginRun(Error))) { return false; }
+
+    const FGuid RunId = Session.Runner.CurrentRunId;
+    const FGuid RequestId = FGuid::NewGuid();
+    Session.Runner.Phase = EAgentRunPhase::RequestingModel;
+    Session.Runner.CurrentRequestId = RequestId;
+    const FDelegateHandle Listener = Session.OnUiChanged.AddLambda([&Session]()
+    {
+        Session.CancelRun();
+    });
+
+    FAgentToolCall ToolCall;
+    ToolCall.Id = TEXT("proposed-tool");
+    ToolCall.Name = TEXT("ue_mcp.catalog.search");
+    ToolCall.ArgumentsJson = TEXT("{}");
+    Session.OnModelResponse(RunId, RequestId, FString(), {ToolCall}, TEXT("{}"));
+    Session.OnUiChanged.Remove(Listener);
+
+    TestEqual(TEXT("UI listener cancelled the Run"), Session.Runner.State,
+        EAgentRunState::Cancelled);
+    TestEqual(TEXT("Cancelled Run keeps its cleared phase"), Session.Runner.Phase,
+        EAgentRunPhase::None);
+    TestEqual(TEXT("Cancelled Run has no tool proposal message"), Session.Messages.Num(), 1);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAgentWorkbenchHookCancelBeforeModelSendTest,
+    "AgentWorkbench.Hooks.CancelBeforeModelSend",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAgentWorkbenchHookCancelBeforeModelSendTest::RunTest(const FString& Parameters)
+{
+    const TSharedRef<FAgentSession> Session = MakeShared<FAgentSession>();
+    Session->DraftText = TEXT("cancel before model send");
+    Session->ModelOptions.Model = TEXT("test-model");
+    FString Error;
+    if (!TestTrue(TEXT("Run starts"), Session->BeginRun(Error))) { return false; }
+
+    const FGuid RequestId = FGuid::NewGuid();
+    Session->Runner.Phase = EAgentRunPhase::RequestingModel;
+    Session->Runner.CurrentRequestId = RequestId;
+    const FDelegateHandle Listener = Session->OnUiChanged.AddLambda([Session]()
+    {
+        Session->CancelRun();
+    });
+    TestFalse(TEXT("Cancellation prevents model request dispatch"),
+        FAgentModelClient::Start(Session, RequestId, Error));
+    Session->OnUiChanged.Remove(Listener);
+    TestEqual(TEXT("Run remains cancelled"), Session->Runner.State,
+        EAgentRunState::Cancelled);
+    TestFalse(TEXT("No active HTTP request remains"), Session->Runner.ActiveRequest.IsValid());
     return true;
 }
 
