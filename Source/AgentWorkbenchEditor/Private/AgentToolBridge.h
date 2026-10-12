@@ -43,4 +43,7 @@ public:
     // The subagent delegation tool. Listed for the parent model, excluded from a
     // subagent's own tool set (single-level delegation), and dispatched as a nested loop.
     static bool IsSubagentToolName(const FString& RegistryName);
+
+    // The file-based skill loading tool. Listed only when FAgentSkillLoader has skills.
+    static bool IsSkillLoadName(const FString& RegistryName);
 };

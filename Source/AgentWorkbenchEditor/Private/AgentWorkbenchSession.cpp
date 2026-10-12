@@ -7,6 +7,7 @@
 #include "AgentToolBridge.h"
 #include "AgentToolWorkflow.h"
 #include "AgentHookRegistry.h"
+#include "AgentSkillLoader.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Containers/Ticker.h"
 #include "HAL/FileManager.h"
@@ -120,6 +121,7 @@ bool FAgentSession::BeginRun(FString& OutError)
     Snapshot.SubagentMaxOutputTokens = FMath::Max(1, Settings->SubagentMaxOutputTokens);
     FAgentToolBridge::FreezeAvailableTools(Snapshot);
     Snapshot.bToolListFrozen = true;
+    Snapshot.SystemPrompt = FAgentSkillLoader::Get().BuildSystemPrompt();
     TSet<FGuid> CompletedRuns;
     for (const TSharedPtr<FAgentEvent>& Event : Events)
     {

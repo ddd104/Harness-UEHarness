@@ -97,6 +97,8 @@ struct FAgentRunInputSnapshot
     int32 SubagentMaxTurns = 12;
     int32 SubagentTimeoutSeconds = 300;
     int32 SubagentMaxOutputTokens = 8000;
+    // Skill catalog system prompt, frozen at Run start. Empty when no skills exist.
+    FString SystemPrompt;
     FDateTime CreatedAt = FDateTime::UtcNow();
 };
 

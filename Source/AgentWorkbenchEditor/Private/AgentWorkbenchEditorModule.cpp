@@ -1,8 +1,12 @@
 #include "AgentHookRegistry.h"
+#include "AgentSkillDirectoryCustomization.h"
+#include "AgentSkillLoader.h"
 #include "AgentWorkbenchSession.h"
+#include "AgentWorkbenchSettings.h"
 #include "AgentToolWorkflow.h"
 #include "Framework/Commands/UIAction.h"
 #include "Modules/ModuleManager.h"
+#include "PropertyEditorModule.h"
 #include "Styling/AppStyle.h"
 #include "ToolMenu.h"
 #include "ToolMenus.h"
@@ -16,6 +20,14 @@ public:
     {
         RegisterAgentWorkbenchToolHooks();
         SessionManager = MakeShared<FAgentSessionManager>();
+        FAgentSkillLoader::Get().Initialize();
+        // Skill directories keep their editor folder picker (project-relative storage).
+        FPropertyEditorModule& PropertyEditor =
+            FModuleManager::LoadModuleChecked<FPropertyEditorModule>(TEXT("PropertyEditor"));
+        PropertyEditor.RegisterCustomPropertyTypeLayout(
+            FAgentSkillDirectory::StaticStruct()->GetFName(),
+            FOnGetPropertyTypeCustomizationInstance::CreateStatic(
+                &FAgentSkillDirectoryCustomization::MakeInstance));
         MenuStartupHandle = UToolMenus::RegisterStartupCallback(
             FSimpleMulticastDelegate::FDelegate::CreateRaw(this, &FAgentWorkbenchEditorModule::RegisterMenus));
     }
@@ -26,8 +38,16 @@ public:
         UToolMenus::UnregisterOwner(this);
         if (SessionManager) { SessionManager->Shutdown(); SessionManager.Reset(); }
         UnregisterAgentWorkbenchToolHooks();
+        if (FModuleManager::Get().IsModuleLoaded(TEXT("PropertyEditor")))
+        {
+            FPropertyEditorModule& PropertyEditor =
+                FModuleManager::GetModuleChecked<FPropertyEditorModule>(TEXT("PropertyEditor"));
+            PropertyEditor.UnregisterCustomPropertyTypeLayout(
+                FAgentSkillDirectory::StaticStruct()->GetFName());
+        }
         // Invalidate pending asynchronous hook continuations before the module unloads.
         if (IsInGameThread()) { FAgentHookRegistry::Get().Shutdown(); }
+        FAgentSkillLoader::Get().Shutdown();
     }
 
 private:

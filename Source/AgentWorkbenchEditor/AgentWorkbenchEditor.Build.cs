@@ -7,9 +7,9 @@ public class AgentWorkbenchEditor : ModuleRules
         PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
         PublicDependencyModuleNames.AddRange(new[] { "Core", "CoreUObject" });
         PrivateDependencyModuleNames.AddRange(new[] {
-            "ApplicationCore", "AssetRegistry", "ContentBrowser", "DeveloperSettings", "Engine",
-            "BSHarnessTools", "GraphEditor", "HTTP", "InputCore", "Json", "Kismet", "LevelEditor",
-            "MaterialEditor", "ModelContextProtocol", "Slate", "SlateCore", "ToolMenus",
+            "ApplicationCore", "AssetRegistry", "ContentBrowser", "DesktopPlatform", "DeveloperSettings",
+            "Engine", "BSHarnessTools", "GraphEditor", "HTTP", "InputCore", "Json", "Kismet", "LevelEditor",
+            "MaterialEditor", "ModelContextProtocol", "PropertyEditor", "Slate", "SlateCore", "ToolMenus",
             "ToolsetRegistry", "UnrealEd"
         });
     }

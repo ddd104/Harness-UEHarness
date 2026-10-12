@@ -3,6 +3,7 @@
 #include "AgentAssetContextService.h"
 #include "AgentUnrealMCPBridge.h"
 #include "AgentWorkbenchSession.h"
+#include "AgentSkillLoader.h"
 #include "Async/Async.h"
 #include "BSHarnessToolsModule.h"
 #include "Engine/Blueprint.h"
@@ -100,6 +101,27 @@ FMCPToolDefinition MakeSubagentDefinition()
     Definition.InputSchema->SetObjectField(TEXT("properties"), Properties);
     TArray<TSharedPtr<FJsonValue>> Required;
     Required.Add(MakeShared<FJsonValueString>(TEXT("prompt")));
+    Definition.InputSchema->SetArrayField(TEXT("required"), MoveTemp(Required));
+    return Definition;
+}
+
+FMCPToolDefinition MakeSkillDefinition()
+{
+    FMCPToolDefinition Definition;
+    Definition.Name = FAgentSkillLoader::LoadToolName();
+    Definition.NativeHandlerId = FAgentSkillLoader::LoadToolHandlerId();
+    Definition.Description = TEXT("Load the full instructions of a file-based skill by its name (from the system prompt's skill catalog). Returns the skill's SKILL.md content; the name is a catalog key, never a file path.");
+    Definition.InputSchema = MakeShared<FJsonObject>();
+    Definition.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
+    const TSharedRef<FJsonObject> Properties = MakeShared<FJsonObject>();
+    const TSharedRef<FJsonObject> NameRule = MakeShared<FJsonObject>();
+    NameRule->SetStringField(TEXT("type"), TEXT("string"));
+    NameRule->SetStringField(TEXT("description"),
+        TEXT("The skill name exactly as listed in the system prompt's skill catalog."));
+    Properties->SetObjectField(TEXT("name"), NameRule);
+    Definition.InputSchema->SetObjectField(TEXT("properties"), Properties);
+    TArray<TSharedPtr<FJsonValue>> Required;
+    Required.Add(MakeShared<FJsonValueString>(TEXT("name")));
     Definition.InputSchema->SetArrayField(TEXT("required"), MoveTemp(Required));
     return Definition;
 }
@@ -431,6 +453,11 @@ TArray<FMCPToolDefinition> FAgentToolBridge::ListAvailable(const FAgentRunInputS
         FMCPToolDefinition Subagent = MakeSubagentDefinition();
         if (IsFrozenBinding(Snapshot, Subagent)) { Available.Add(MoveTemp(Subagent)); }
     }
+    if (FAgentSkillLoader::Get().HasSkills())
+    {
+        FMCPToolDefinition Skill = MakeSkillDefinition();
+        if (IsFrozenBinding(Snapshot, Skill)) { Available.Add(MoveTemp(Skill)); }
+    }
     // UE schemas remain in the frozen local catalog and are fetched through
     // catalog.describe. Keep provider requests stable across model vendors.
     RemoveNameAndAliasConflicts(Available);
@@ -447,6 +474,7 @@ void FAgentToolBridge::FreezeAvailableTools(FAgentRunInputSnapshot& Snapshot)
         FBSHarnessToolsModule::Get().GetToolRegistry().ListTools());
     All.Append(MetaDefinitions());
     if (Snapshot.bSubagentToolEnabled) { All.Add(MakeSubagentDefinition()); }
+    if (FAgentSkillLoader::Get().HasSkills()) { All.Add(MakeSkillDefinition()); }
     All.Append(FAgentUnrealMCPBridge::ListAvailable());
     RemoveNameAndAliasConflicts(All);
     for (const FMCPToolDefinition& Definition : All)
@@ -553,6 +581,10 @@ bool FAgentToolBridge::RequiresApproval(const FAgentRunInputSnapshot& Snapshot, 
             : RegistryName == CatalogDescribeName ? CatalogDescribeId : CatalogCallId;
         return *FrozenHandler != Expected || RegistryName == CatalogCallName;
     }
+    if (IsSkillLoadName(RegistryName))
+    {
+        return *FrozenHandler != FAgentSkillLoader::LoadToolHandlerId();
+    }
     const TArray<FMCPToolDefinition> Current = FBSHarnessToolsModule::Get().GetToolRegistry().ListTools();
     const FMCPToolDefinition* Native = Current.FindByPredicate([&](const FMCPToolDefinition& Definition)
     {
@@ -646,6 +678,35 @@ void FAgentToolBridge::Execute(const FAgentRunInputSnapshot& Snapshot, const FSt
             return;
         }
         Completion(FAgentUnrealMCPBridge::SearchCatalog(Snapshot.AllowedToolHandlerIds, Query, Offset, Limit));
+        return;
+    }
+    if (IsSkillLoadName(RegistryName))
+    {
+        if (*FrozenHandler != FAgentSkillLoader::LoadToolHandlerId())
+        {
+            Completion(FMCPToolResult::ProtocolError(-32602, TEXT("Skill tool identity changed since this run started.")));
+            return;
+        }
+        if (Arguments->Values.Num() != 1)
+        {
+            Completion(FMCPToolResult::ProtocolError(-32602, TEXT("load_skill requires exactly the skill name.")));
+            return;
+        }
+        FString SkillName;
+        if (!Arguments->TryGetStringField(TEXT("name"), SkillName) || SkillName.IsEmpty())
+        {
+            Completion(FMCPToolResult::ProtocolError(-32602, TEXT("name must be a non-empty string.")));
+            return;
+        }
+        FString Content;
+        if (!FAgentSkillLoader::Get().TryLoad(SkillName, Content))
+        {
+            Completion(FMCPToolResult::Failure(FString::Printf(
+                TEXT("Error: Unknown skill '%s'. Available: %s"),
+                *SkillName, *FAgentSkillLoader::Get().AvailableSkillsSummary())));
+            return;
+        }
+        Completion(FMCPToolResult::Success(Content));
         return;
     }
     FMCPToolRegistry& Registry = FBSHarnessToolsModule::Get().GetToolRegistry();
@@ -760,6 +821,11 @@ FString FAgentToolBridge::FromModelName(const FString& ModelName)
 bool FAgentToolBridge::IsSubagentToolName(const FString& RegistryName)
 {
     return RegistryName.Equals(SubagentTaskName, ESearchCase::CaseSensitive);
+}
+
+bool FAgentToolBridge::IsSkillLoadName(const FString& RegistryName)
+{
+    return RegistryName.Equals(FAgentSkillLoader::LoadToolName(), ESearchCase::CaseSensitive);
 }
 
 #if WITH_DEV_AUTOMATION_TESTS

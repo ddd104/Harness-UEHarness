@@ -185,6 +185,16 @@ bool BuildBody(EAgentWorkbenchProvider Provider, const FAgentRunInputSnapshot& S
             Contents.Add(MakeShared<FJsonValueObject>(Item));
         }
         Body->SetArrayField(TEXT("contents"), MoveTemp(Contents));
+        if (!Snapshot.SystemPrompt.IsEmpty())
+        {
+            FJson SystemInstruction = MakeShared<FJsonObject>();
+            TArray<TSharedPtr<FJsonValue>> SystemParts;
+            FJson SystemPart = MakeShared<FJsonObject>();
+            SystemPart->SetStringField(TEXT("text"), Snapshot.SystemPrompt);
+            SystemParts.Add(MakeShared<FJsonValueObject>(SystemPart));
+            SystemInstruction->SetArrayField(TEXT("parts"), MoveTemp(SystemParts));
+            Body->SetObjectField(TEXT("systemInstruction"), SystemInstruction);
+        }
         FJson Config = MakeShared<FJsonObject>();
         Config->SetNumberField(TEXT("maxOutputTokens"), Snapshot.ModelOptions.MaxOutputTokens);
         Body->SetObjectField(TEXT("generationConfig"), Config);
@@ -318,6 +328,20 @@ bool BuildBody(EAgentWorkbenchProvider Provider, const FAgentRunInputSnapshot& S
             Item->SetStringField(TEXT("content"), Turn.Role == EAgentMessageRole::User ? UserContent(Turn) : Turn.Text);
         }
         Messages.Add(MakeShared<FJsonValueObject>(Item));
+    }
+    if (!Snapshot.SystemPrompt.IsEmpty())
+    {
+        if (Provider == EAgentWorkbenchProvider::Anthropic)
+        {
+            Body->SetStringField(TEXT("system"), Snapshot.SystemPrompt);
+        }
+        else
+        {
+            FJson SystemMessage = MakeShared<FJsonObject>();
+            SystemMessage->SetStringField(TEXT("role"), TEXT("system"));
+            SystemMessage->SetStringField(TEXT("content"), Snapshot.SystemPrompt);
+            Messages.Insert(MakeShared<FJsonValueObject>(SystemMessage), 0);
+        }
     }
     Body->SetArrayField(TEXT("messages"), MoveTemp(Messages));
     Body->SetStringField(TEXT("model"), Snapshot.ModelOptions.Model);
@@ -962,6 +986,59 @@ bool FAgentModelClientToolProtocolTest::RunTest(const FString& Parameters)
             ObjectField(Declaration, TEXT("parametersJsonSchema")).IsValid());
     }
     else { AddError(TEXT("Gemini continuation lost conversation contents.")); }
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAgentModelClientSystemPromptTest,
+    "AgentWorkbench.ModelClient.SystemPrompt",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAgentModelClientSystemPromptTest::RunTest(const FString& Parameters)
+{
+    FAgentRunInputSnapshot Snapshot;
+    Snapshot.ModelOptions.Model = TEXT("system-prompt-test");
+    Snapshot.SystemPrompt = TEXT("Skills available:\n- code-review: Review code.\n\nUse load_skill.");
+
+    FAgentConversationTurn User;
+    User.Role = EAgentMessageRole::User;
+    User.Text = TEXT("hello");
+    TArray<FAgentConversationTurn> Conversation;
+    Conversation.Add(User);
+    const TArray<FMCPToolDefinition> Tools;
+
+    TSharedPtr<FJsonObject> Body;
+    FString Error;
+
+    TestTrue(TEXT("OpenAI-compatible body builds"),
+        BuildBody(EAgentWorkbenchProvider::DeepSeek, Snapshot, Conversation, Tools, Body, Error));
+    const TArray<TSharedPtr<FJsonValue>>* Messages = nullptr;
+    if (Body && Body->TryGetArrayField(TEXT("messages"), Messages) && Messages->Num() == 2)
+    {
+        const TSharedPtr<FJsonObject> First = ObjectValue((*Messages)[0]);
+        FString Role;
+        TestTrue(TEXT("System message is first"),
+            First && First->TryGetStringField(TEXT("role"), Role) && Role == TEXT("system"));
+    }
+    else { AddError(TEXT("OpenAI-compatible system message not prepended.")); }
+
+    TestTrue(TEXT("Anthropic body builds"),
+        BuildBody(EAgentWorkbenchProvider::Anthropic, Snapshot, Conversation, Tools, Body, Error));
+    FString AnthropicSystem;
+    TestTrue(TEXT("Anthropic system field set"),
+        Body && Body->TryGetStringField(TEXT("system"), AnthropicSystem)
+        && AnthropicSystem == Snapshot.SystemPrompt);
+
+    TestTrue(TEXT("Gemini body builds"),
+        BuildBody(EAgentWorkbenchProvider::Gemini, Snapshot, Conversation, Tools, Body, Error));
+    const TSharedPtr<FJsonObject> SystemInstruction = ObjectField(Body, TEXT("systemInstruction"));
+    const TArray<TSharedPtr<FJsonValue>>* Parts = nullptr;
+    const TSharedPtr<FJsonObject> Part = SystemInstruction
+        && SystemInstruction->TryGetArrayField(TEXT("parts"), Parts) && Parts->Num() == 1
+            ? ObjectValue((*Parts)[0]) : nullptr;
+    FString SystemText;
+    TestTrue(TEXT("Gemini systemInstruction set"),
+        Part && Part->TryGetStringField(TEXT("text"), SystemText) && SystemText == Snapshot.SystemPrompt);
+
     return true;
 }
 
