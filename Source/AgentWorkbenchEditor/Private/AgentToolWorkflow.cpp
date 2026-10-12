@@ -3,6 +3,7 @@
 #include "AgentToolSchemaValidator.h"
 #include "AgentUnrealMCPBridge.h"
 #include "AgentAssetViewFollow.h"
+#include "AgentSubagentRunner.h"
 #include "BSHarnessHookRegistry.h"
 #include "Async/Async.h"
 #include "Containers/Ticker.h"
@@ -410,6 +411,24 @@ void DispatchTool(const TSharedRef<FWorkflowCall>& Work)
             FMCPToolResult::Failure(TEXT("Tool now requires approval before dispatch.")));
         return;
     }
+    if (FAgentToolBridge::IsSubagentToolName(FinalTarget))
+    {
+        Work->bWasDispatched = true;
+        FString Prompt;
+        FinalArguments->TryGetStringField(TEXT("prompt"), Prompt);
+        FAgentSubagentConfig Config;
+        Config.MaxTurns = Work->Invocation.Snapshot->SubagentMaxTurns;
+        Config.MaxOutputTokens = Work->Invocation.Snapshot->SubagentMaxOutputTokens;
+        // The tool deadline already clamps the subagent budget to the Run deadline and to
+        // SubagentTimeoutSeconds, so the runner and the workflow timeout agree on one value.
+        Config.DeadlineSeconds = Work->ToolDeadlineSeconds;
+        FAgentSubagentRunner::Run(Work->Invocation.Snapshot, Work->Invocation.CancellationToken,
+            Prompt, Config, [Work](FMCPToolResult Result)
+            {
+                Finish(Work, EBSHookToolOutcomeKind::Dispatched, MoveTemp(Result));
+            });
+        return;
+    }
     Work->bWasDispatched = true;
     FAgentToolBridge::Execute(*Work->Invocation.Snapshot, Work->Invocation.Call.Name,
         Work->Arguments.ToSharedRef(), DispatchSeconds, Work->bApproved,
@@ -481,6 +500,14 @@ void RequestApprovalOrRunBefore(const TSharedRef<FWorkflowCall>& Work)
 {
     check(IsInGameThread());
     if (StopIfCancelledOrTimedOut(Work)) { return; }
+    // Subagent tool calls were approved once at the task tool boundary; they skip the
+    // approval hook but keep argument validation and the before/ready/after hooks.
+    if (Work->Invocation.bPreapproved)
+    {
+        Work->bApproved = true;
+        RunBeforeAndSchedule(Work);
+        return;
+    }
     if (!Work->Context.bRequiresApproval)
     {
         RunBeforeAndSchedule(Work);

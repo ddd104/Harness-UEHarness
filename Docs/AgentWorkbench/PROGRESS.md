@@ -223,3 +223,12 @@
 - Agent Session 在发送快照冻结后触发提示词 Hook；扩展可拒绝或补充本轮模型上下文，不能改用户原文及 Run 身份。完成、失败、超时、取消和关闭各触发一次退出事件。工具流程由注册表调度审批、前置处理、编辑器视图准备及后置观察；审批先于可短路的前置处理，派发前再次校验冻结目标、Schema、处理器身份、参数、取消和期限。审批窗口显示完整原始 JSON；实际 UE 工具继续跨引擎帧派发。修正同步界面通知中取消 Run 后仍可能发送模型请求或继续写入工具提议的重入边界。
 - `UEHarnessEditor Win64 DebugGame -NoHotReload -NoUBA -MaxParallelActions=1` 完整编译链接成功。初次高并发构建因系统提交内存接近上限而中止，单并发重试后成功。DebugGame 命令行自动化报告：`Saved/Automation/BSHarnessHooksRegistry/index.json` 为 3/3，`Saved/Automation/AgentWorkbenchHooksVerified/index.json` 为 4/4，`Saved/Automation/AgentWorkbenchHookWorkflow/index.json` 为 8/8，均无失败；`git diff --check` 通过。
 - 当前图形 Development 编辑器仍加载旧 DLL，未重启验收新 Hook 的实际交互；动态热卸载和真实写工具场景也未在本轮手工验证。直接调用 MCP 分派器的入口不经过 Agent Workbench Hook。
+
+## 2026-10-12 Subagent 委派工具（task）
+
+- 在 `AgentWorkbenchEditor` 内新增 `task` 子代理组件（非独立 UE 模块）。`FAgentToolBridge` 注册 `bsharness.subagent.task` 工具（`prompt` 必填 string），父模型可调用；子代理工具列表 = 父 Run 冻结目录减去 `task`，实现单层委派。
+- 新增 `FAgentSubagentRunner`（`AgentSubagentRunner.h/.cpp`）：以全新 `TArray<FAgentConversationTurn>`（仅一条 User prompt）运行嵌套「模型→工具→模型」循环，复用父快照的 Provider/模型/冻结工具身份，只回传最终文本；子代理内部步骤仅 UE_LOG，不进入父对话与持久化。父 Run 取消/总超时经共享令牌与截止时间传播，含每 0.05s 的截止 ticker 与在途请求取消。
+- 审批策略按本次选择「仅对 task 整体审批一次、内层继承」：`task` 走既有审批 Hook（Ask/Smart 弹窗一次，Unrestricted 自动批准）；内层工具调用通过 `FAgentToolInvocation::bPreapproved` 跳过审批 Hook，但保留参数 Schema 校验与 Before/Ready/After Hook。
+- `FAgentModelClient` 新增与 Session 解耦的 `RunTurn`（构建/发送/解析一次模型轮次，回 Game Thread 完成回调），父 `Start` 保持不变；`FAgentRunInputSnapshot` 与 `UAgentWorkbenchSettings` 新增 `bEnableSubagentTool/SubagentMaxTurns/SubagentTimeoutSeconds/SubagentMaxOutputTokens`（默认 开启/12/300/8000），`ExecuteNextTool` 为 `task` 使用子代理超时预算。
+- 验证：`EHVEditor Win64 Development` 完整编译链接成功（`Build.bat` 退出码 0）。命令行自动化 `Automation RunTests AgentWorkbench` 报告 `Saved/Automation/AgentWorkbenchSubagentFinal/index.json`：43/44 成功；唯一失败为既有 `AgentWorkbench.P1.SettingsDefaults`（项目 `ToolTimeoutSeconds=300` 与测试期待 60 不符，与本次无关）。新增 `AgentWorkbench.Subagent.ToolRegistration` 1/1 成功，覆盖工具名识别、父模型可见性与 `bEnableSubagentTool=false` 隐藏。
+- 未验证：图形编辑器内真实 Provider 的 `task` 闭环、审批弹窗文案观感与子代理内部 UE_LOG 输出未手工验收；自动化未走真实网络，嵌套循环只经结构/注册逻辑覆盖。

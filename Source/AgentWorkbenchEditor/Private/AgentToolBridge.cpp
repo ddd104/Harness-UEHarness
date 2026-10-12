@@ -20,6 +20,8 @@ constexpr TCHAR CatalogCallName[] = TEXT("ue_mcp.call_tool");
 constexpr TCHAR CatalogSearchId[] = TEXT("ue_mcp.meta.search.v1");
 constexpr TCHAR CatalogDescribeId[] = TEXT("ue_mcp.meta.describe.v1");
 constexpr TCHAR CatalogCallId[] = TEXT("ue_mcp.meta.call.v1");
+constexpr TCHAR SubagentTaskName[] = TEXT("bsharness.subagent.task");
+constexpr TCHAR SubagentTaskId[] = TEXT("subagent.task");
 
 FMCPToolDefinition MakeMetaDefinition(const TCHAR* Name, const TCHAR* HandlerId,
     const TCHAR* Description, const TArray<FString>& StringProperties,
@@ -79,6 +81,27 @@ TArray<FMCPToolDefinition> MetaDefinitions()
         TEXT("Call a UE MCP tool by registry_name, using arguments that match its described schema. Approval follows the run's selected permission mode."),
         {TEXT("registry_name")}, {TEXT("registry_name"), TEXT("arguments")}));
     return Definitions;
+}
+
+FMCPToolDefinition MakeSubagentDefinition()
+{
+    FMCPToolDefinition Definition;
+    Definition.Name = SubagentTaskName;
+    Definition.NativeHandlerId = SubagentTaskId;
+    Definition.Description = TEXT("Delegate a self-contained subtask to a subagent that runs with a fresh conversation context. The subagent uses the same read-only tools but cannot delegate further, and returns only its final text; its file and tool side effects share this project's workspace.");
+    Definition.InputSchema = MakeShared<FJsonObject>();
+    Definition.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
+    const TSharedRef<FJsonObject> Properties = MakeShared<FJsonObject>();
+    const TSharedRef<FJsonObject> PromptRule = MakeShared<FJsonObject>();
+    PromptRule->SetStringField(TEXT("type"), TEXT("string"));
+    PromptRule->SetStringField(TEXT("description"),
+        TEXT("The complete, self-contained instructions for the subagent. It cannot ask clarifying questions, so include everything it needs."));
+    Properties->SetObjectField(TEXT("prompt"), PromptRule);
+    Definition.InputSchema->SetObjectField(TEXT("properties"), Properties);
+    TArray<TSharedPtr<FJsonValue>> Required;
+    Required.Add(MakeShared<FJsonValueString>(TEXT("prompt")));
+    Definition.InputSchema->SetArrayField(TEXT("required"), MoveTemp(Required));
+    return Definition;
 }
 
 bool IsMetaName(const FString& Name)
@@ -403,6 +426,11 @@ TArray<FMCPToolDefinition> FAgentToolBridge::ListAvailable(const FAgentRunInputS
     {
         if (IsFrozenBinding(Snapshot, Meta)) { Available.Add(MoveTemp(Meta)); }
     }
+    if (Snapshot.bSubagentToolEnabled)
+    {
+        FMCPToolDefinition Subagent = MakeSubagentDefinition();
+        if (IsFrozenBinding(Snapshot, Subagent)) { Available.Add(MoveTemp(Subagent)); }
+    }
     // UE schemas remain in the frozen local catalog and are fetched through
     // catalog.describe. Keep provider requests stable across model vendors.
     RemoveNameAndAliasConflicts(Available);
@@ -418,6 +446,7 @@ void FAgentToolBridge::FreezeAvailableTools(FAgentRunInputSnapshot& Snapshot)
     TArray<FMCPToolDefinition> All = FilterDefinitions(Snapshot,
         FBSHarnessToolsModule::Get().GetToolRegistry().ListTools());
     All.Append(MetaDefinitions());
+    if (Snapshot.bSubagentToolEnabled) { All.Add(MakeSubagentDefinition()); }
     All.Append(FAgentUnrealMCPBridge::ListAvailable());
     RemoveNameAndAliasConflicts(All);
     for (const FMCPToolDefinition& Definition : All)
@@ -726,6 +755,11 @@ FString FAgentToolBridge::FromModelName(const FString& ModelName)
         }
     }
     return Match;
+}
+
+bool FAgentToolBridge::IsSubagentToolName(const FString& RegistryName)
+{
+    return RegistryName.Equals(SubagentTaskName, ESearchCase::CaseSensitive);
 }
 
 #if WITH_DEV_AUTOMATION_TESTS

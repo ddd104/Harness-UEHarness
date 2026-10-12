@@ -114,6 +114,10 @@ bool FAgentSession::BeginRun(FString& OutError)
     Snapshot.ToolTimeoutSeconds = FMath::Max(1, Settings->ToolTimeoutSeconds);
     Snapshot.RunTimeoutSeconds = FMath::Max(1, Settings->RunTimeoutSeconds);
     Snapshot.MaxToolSteps = FMath::Max(1, Settings->MaxToolSteps);
+    Snapshot.bSubagentToolEnabled = Settings->bEnableSubagentTool;
+    Snapshot.SubagentMaxTurns = FMath::Max(1, Settings->SubagentMaxTurns);
+    Snapshot.SubagentTimeoutSeconds = FMath::Max(1, Settings->SubagentTimeoutSeconds);
+    Snapshot.SubagentMaxOutputTokens = FMath::Max(1, Settings->SubagentMaxOutputTokens);
     FAgentToolBridge::FreezeAvailableTools(Snapshot);
     Snapshot.bToolListFrozen = true;
     TSet<FGuid> CompletedRuns;
@@ -365,7 +369,11 @@ void FAgentSession::ExecuteNextTool(const FGuid& RunId)
         FString::Printf(TEXT("调用工具：%s"), *Call.Name), Call.ArgumentsJson);
     Touch();
     const double Remaining = Runner.RunDeadlineSeconds - FPlatformTime::Seconds();
-    const double Timeout = FMath::Min<double>(Runner.LastSnapshot->ToolTimeoutSeconds, Remaining);
+    const bool bSubagent = FAgentToolBridge::IsSubagentToolName(Call.Name);
+    const double ToolBudget = bSubagent
+        ? static_cast<double>(FMath::Max(1, Runner.LastSnapshot->SubagentTimeoutSeconds))
+        : static_cast<double>(Runner.LastSnapshot->ToolTimeoutSeconds);
+    const double Timeout = FMath::Min<double>(ToolBudget, Remaining);
     if (Timeout <= 0.0) { FailRun(RunId, TEXT("Run exceeded its total timeout."), true); return; }
     const FAgentToolInvocation Invocation{Runner.LastSnapshot.ToSharedRef(),
         Runner.CancellationToken.ToSharedRef(), Runner.CurrentRequestId, Call,
@@ -378,14 +386,16 @@ void FAgentSession::ExecuteNextTool(const FGuid& RunId)
             if (!Current) { return; }
             FString ResultText;
             FJsonSerializer::Serialize(Result.ToJson(), TJsonWriterFactory<>::Create(&ResultText));
-            constexpr int32 MaxToolResultChars = 16000;
-            if (ResultText.Len() > MaxToolResultChars)
+            // Inline limit for the conversation transcript; the bridge's 1 MiB limit
+            // applies to the raw UE tool payload before it reaches this point.
+            constexpr int32 MaxInlineToolResultChars = 16000;
+            if (ResultText.Len() > MaxInlineToolResultChars)
             {
                 const int32 OriginalLength = ResultText.Len();
                 TSharedRef<FJsonObject> Truncated = MakeShared<FJsonObject>();
                 Truncated->SetBoolField(TEXT("truncated"), true);
                 Truncated->SetNumberField(TEXT("original_chars"), OriginalLength);
-                Truncated->SetStringField(TEXT("preview"), ResultText.Left(MaxToolResultChars));
+                Truncated->SetStringField(TEXT("preview"), ResultText.Left(MaxInlineToolResultChars));
                 ResultText.Empty();
                 FJsonSerializer::Serialize(Truncated, TJsonWriterFactory<>::Create(&ResultText));
             }

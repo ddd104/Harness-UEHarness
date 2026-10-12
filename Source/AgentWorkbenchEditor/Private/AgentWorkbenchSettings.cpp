@@ -11,6 +11,10 @@ UAgentWorkbenchSettings::UAgentWorkbenchSettings()
     , MaxToolSteps(16)
     , MaxConcurrentRuns(4)
     , MaxCandidateAssets(64)
+    , bEnableSubagentTool(true)
+    , SubagentMaxTurns(12)
+    , SubagentTimeoutSeconds(300)
+    , SubagentMaxOutputTokens(8000)
     , bPersistDetailedPayloads(false)
 {
     AvailableModels.Add(TEXT("deepseek-flash"));

@@ -12,6 +12,9 @@ struct FAgentToolInvocation
     FAgentToolCall Call;
     // The Run deadline is independent of the tool's execution timeout.
     double RunDeadlineSeconds = 0.0;
+    // Subagent tool calls inherit the parent run's approval: the task tool itself was
+    // approved once, so inner calls skip the approval hook but keep validation and hooks.
+    bool bPreapproved = false;
 };
 
 struct FAgentResolvedToolInvocation

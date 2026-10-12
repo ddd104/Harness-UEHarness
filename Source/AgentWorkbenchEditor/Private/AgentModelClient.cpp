@@ -1,4 +1,5 @@
 #include "AgentModelClient.h"
+#include "AgentWorkbenchJson.h"
 #include "AgentToolBridge.h"
 #include "AgentWorkbenchSession.h"
 #include "Async/Async.h"
@@ -16,6 +17,9 @@
 
 namespace
 {
+using AgentWorkbenchJson::ParseObject;
+using AgentWorkbenchJson::SerializeJson;
+
 using FJson = TSharedRef<FJsonObject>;
 
 FString EnvironmentValue(const FString& Name)
@@ -50,19 +54,6 @@ FString Endpoint(EAgentWorkbenchProvider Provider, const FString& Base, const FS
         return Url.EndsWith(TEXT("/messages")) ? Url : Url + TEXT("/messages");
     }
     return Url.EndsWith(TEXT("/chat/completions")) ? Url : Url + TEXT("/chat/completions");
-}
-
-FString SerializeJson(const FJson& Object)
-{
-    FString Result;
-    FJsonSerializer::Serialize(Object, TJsonWriterFactory<>::Create(&Result));
-    return Result;
-}
-
-bool ParseObject(const FString& Text, TSharedPtr<FJsonObject>& OutObject)
-{
-    OutObject.Reset();
-    return FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Text), OutObject) && OutObject.IsValid();
 }
 
 TSharedPtr<FJsonObject> ObjectField(const TSharedPtr<FJsonObject>& Parent, const TCHAR* Name)
@@ -681,6 +672,124 @@ bool FAgentModelClient::Start(const TSharedRef<FAgentSession>& Session, const FG
         return false;
     }
     return true;
+}
+
+void FAgentModelClient::RunTurn(
+    const FAgentRunInputSnapshot& Snapshot,
+    const TArray<FAgentConversationTurn>& Conversation,
+    const TArray<FMCPToolDefinition>& Tools,
+    const FGuid& RequestId,
+    double DeadlineSeconds,
+    const TSharedPtr<std::atomic<bool>, ESPMode::ThreadSafe>& CancellationToken,
+    TSharedPtr<IHttpRequest, ESPMode::ThreadSafe>& OutActiveRequest,
+    TFunction<void(FAgentModelTurnResult)> Completion)
+{
+    check(IsInGameThread());
+    OutActiveRequest.Reset();
+    FAgentModelTurnResult Result;
+    const UAgentWorkbenchSettings* Settings = GetDefault<UAgentWorkbenchSettings>();
+    const EAgentWorkbenchProvider Provider = Snapshot.ProviderType;
+    const FString Url = Endpoint(Provider, EnvironmentValue(Settings->BaseUrlEnvironmentVariable), Snapshot.ModelOptions.Model);
+    if (Url.IsEmpty()) { Result.Error = TEXT("无法确定模型请求地址。"); Completion(MoveTemp(Result)); return; }
+
+    TMap<FString, FString> Aliases;
+    for (const FMCPToolDefinition& Tool : Tools)
+    {
+        const FString Alias = FAgentToolBridge::ToModelName(Tool.Name);
+        if (Alias.IsEmpty() || !Tool.InputSchema || Aliases.Contains(Alias))
+        {
+            Result.Error = FString::Printf(TEXT("工具 %s 的模型名称冲突或参数定义无效。"), *Tool.Name);
+            Completion(MoveTemp(Result));
+            return;
+        }
+        Aliases.Add(Alias, Tool.Name);
+    }
+
+    TSharedPtr<FJsonObject> Body;
+    if (!BuildBody(Provider, Snapshot, Conversation, Tools, Body, Result.Error))
+    {
+        Completion(MoveTemp(Result));
+        return;
+    }
+    if (DeadlineSeconds > 0.0 && FPlatformTime::Seconds() >= DeadlineSeconds)
+    {
+        Result.Error = TEXT("任务已超过总超时限制。");
+        Completion(MoveTemp(Result));
+        return;
+    }
+    if (CancellationToken.IsValid() && CancellationToken->load())
+    {
+        Result.Error = TEXT("任务已取消。");
+        Completion(MoveTemp(Result));
+        return;
+    }
+
+    const FString BodyText = SerializeJson(Body.ToSharedRef());
+    const FString ApiKey = EnvironmentValue(Settings->ApiKeyEnvironmentVariable);
+    const TSharedRef<TFunction<void(FAgentModelTurnResult)>> CompletionRef =
+        MakeShared<TFunction<void(FAgentModelTurnResult)>>(MoveTemp(Completion));
+
+    TSharedRef<IHttpRequest, ESPMode::ThreadSafe> Request = FHttpModule::Get().CreateRequest();
+    Request->SetURL(Url);
+    Request->SetVerb(TEXT("POST"));
+    Request->SetHeader(TEXT("Content-Type"), TEXT("application/json"));
+    if (Provider == EAgentWorkbenchProvider::Anthropic)
+    {
+        Request->SetHeader(TEXT("x-api-key"), ApiKey);
+        Request->SetHeader(TEXT("anthropic-version"), TEXT("2023-06-01"));
+    }
+    else if (Provider == EAgentWorkbenchProvider::Gemini) { Request->SetHeader(TEXT("x-goog-api-key"), ApiKey); }
+    else if (!ApiKey.IsEmpty()) { Request->SetHeader(TEXT("Authorization"), TEXT("Bearer ") + ApiKey); }
+    Request->SetContentAsString(BodyText);
+    const double Remaining = DeadlineSeconds > 0.0
+        ? FMath::Max(0.0, DeadlineSeconds - FPlatformTime::Seconds())
+        : static_cast<double>(Snapshot.RequestTimeoutSeconds);
+    Request->SetTimeout(static_cast<float>(FMath::Min(
+        static_cast<double>(Snapshot.RequestTimeoutSeconds), Remaining)));
+
+    Request->OnProcessRequestComplete().BindLambda(
+        [RequestId, Provider, Aliases, ApiKey, CompletionRef]
+        (FHttpRequestPtr, FHttpResponsePtr Response, bool bSucceeded) mutable
+    {
+        const int32 Status = Response ? Response->GetResponseCode() : 0;
+        const FString ResponseText = Response ? Response->GetContentAsString() : FString();
+        AsyncTask(ENamedThreads::GameThread,
+            [RequestId, Provider, Aliases, ApiKey, Status, ResponseText, bSucceeded, CompletionRef]() mutable
+        {
+            FAgentModelTurnResult Result;
+            Result.bTransportSucceeded = bSucceeded && Status >= 200 && Status < 300;
+            Result.HttpStatus = Status;
+            FString SafeResponse = ResponseText;
+            if (!ApiKey.IsEmpty()) { SafeResponse.ReplaceInline(*ApiKey, TEXT("[redacted]")); }
+            Result.ResponseText = SafeResponse;
+            if (!Result.bTransportSucceeded)
+            {
+                Result.Error = FString::Printf(TEXT("模型请求失败（HTTP %d）：%s"), Status, *SafeResponse.Left(1000));
+                (*CompletionRef)(MoveTemp(Result));
+                return;
+            }
+            FString Reply, ParseError;
+            TArray<FAgentToolCall> Calls;
+            if (!ParseResponse(Provider, ResponseText, RequestId, Aliases, Reply, Calls, ParseError))
+            {
+                Result.Error = ParseError;
+                (*CompletionRef)(MoveTemp(Result));
+                return;
+            }
+            Result.bParsed = true;
+            Result.ReplyText = MoveTemp(Reply);
+            Result.ToolCalls = MoveTemp(Calls);
+            (*CompletionRef)(MoveTemp(Result));
+        });
+    });
+
+    OutActiveRequest = Request;
+    if (!Request->ProcessRequest())
+    {
+        OutActiveRequest.Reset();
+        Result.Error = TEXT("无法启动模型网络请求；请检查地址和网络连接。");
+        (*CompletionRef)(MoveTemp(Result));
+    }
 }
 
 #if WITH_DEV_AUTOMATION_TESTS

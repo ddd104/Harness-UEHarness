@@ -93,6 +93,10 @@ struct FAgentRunInputSnapshot
     int32 ToolTimeoutSeconds = 60;
     int32 RunTimeoutSeconds = 900;
     int32 MaxToolSteps = 16;
+    bool bSubagentToolEnabled = true;
+    int32 SubagentMaxTurns = 12;
+    int32 SubagentTimeoutSeconds = 300;
+    int32 SubagentMaxOutputTokens = 8000;
     FDateTime CreatedAt = FDateTime::UtcNow();
 };
 

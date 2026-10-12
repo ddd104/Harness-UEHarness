@@ -36,5 +36,9 @@ public:
     UPROPERTY(Config, EditAnywhere, Category="Limits", meta=(ClampMin="1")) int32 MaxToolSteps;
     UPROPERTY(Config, EditAnywhere, Category="Limits", meta=(ClampMin="1")) int32 MaxConcurrentRuns;
     UPROPERTY(Config, EditAnywhere, Category="Limits", meta=(ClampMin="1")) int32 MaxCandidateAssets;
+    UPROPERTY(Config, EditAnywhere, Category="Subagent") bool bEnableSubagentTool;
+    UPROPERTY(Config, EditAnywhere, Category="Subagent", meta=(ClampMin="1")) int32 SubagentMaxTurns;
+    UPROPERTY(Config, EditAnywhere, Category="Subagent", meta=(ClampMin="1")) int32 SubagentTimeoutSeconds;
+    UPROPERTY(Config, EditAnywhere, Category="Subagent", meta=(ClampMin="1")) int32 SubagentMaxOutputTokens;
     UPROPERTY(Config, EditAnywhere, Category="Privacy") bool bPersistDetailedPayloads;
 };

@@ -39,4 +39,8 @@ public:
     // the alias table captured with that request, not a later registry lookup.
     static FString ToModelName(const FString& RegistryName);
     static FString FromModelName(const FString& ModelName);
+
+    // The subagent delegation tool. Listed for the parent model, excluded from a
+    // subagent's own tool set (single-level delegation), and dispatched as a nested loop.
+    static bool IsSubagentToolName(const FString& RegistryName);
 };

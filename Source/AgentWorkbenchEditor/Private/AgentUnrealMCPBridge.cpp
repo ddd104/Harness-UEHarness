@@ -1,4 +1,5 @@
 #include "AgentUnrealMCPBridge.h"
+#include "AgentWorkbenchJson.h"
 #include "AgentToolSchemaValidator.h"
 #include "AgentToolBridge.h"
 #include "AgentWorkbenchSession.h"
@@ -20,6 +21,9 @@
 
 namespace
 {
+using AgentWorkbenchJson::ParseObject;
+using AgentWorkbenchJson::SerializeJson;
+
 constexpr int32 MaxToolResultChars = 1024 * 1024;
 constexpr TCHAR UnrealPrefix[] = TEXT("ue_mcp.");
 
@@ -47,18 +51,6 @@ struct FUnrealBinding
 // Accessed only on the game thread. Weak references make removal/reload visible
 // and a new instance receives a new ID even if it reuses a tool name.
 TMap<FString, FUnrealBinding> CurrentBindings;
-
-FString SerializeJson(const TSharedRef<FJsonObject>& Object)
-{
-    FString Text;
-    FJsonSerializer::Serialize(Object, TJsonWriterFactory<>::Create(&Text));
-    return Text;
-}
-
-bool ParseObject(const FString& Text, TSharedPtr<FJsonObject>& OutObject)
-{
-    return FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Text), OutObject) && OutObject.IsValid();
-}
 
 bool IsObjectSchema(const TSharedPtr<FJsonObject>& Schema)
 {
