@@ -1,3 +1,4 @@
+#include "AgentHookRegistry.h"
 #include "AgentWorkbenchSession.h"
 #include "AgentToolWorkflow.h"
 #include "Framework/Commands/UIAction.h"
@@ -25,6 +26,8 @@ public:
         UToolMenus::UnregisterOwner(this);
         if (SessionManager) { SessionManager->Shutdown(); SessionManager.Reset(); }
         UnregisterAgentWorkbenchToolHooks();
+        // Invalidate pending asynchronous hook continuations before the module unloads.
+        if (IsInGameThread()) { FAgentHookRegistry::Get().Shutdown(); }
     }
 
 private:

@@ -232,3 +232,12 @@
 - `FAgentModelClient` 新增与 Session 解耦的 `RunTurn`（构建/发送/解析一次模型轮次，回 Game Thread 完成回调），父 `Start` 保持不变；`FAgentRunInputSnapshot` 与 `UAgentWorkbenchSettings` 新增 `bEnableSubagentTool/SubagentMaxTurns/SubagentTimeoutSeconds/SubagentMaxOutputTokens`（默认 开启/12/300/8000），`ExecuteNextTool` 为 `task` 使用子代理超时预算。
 - 验证：`EHVEditor Win64 Development` 完整编译链接成功（`Build.bat` 退出码 0）。命令行自动化 `Automation RunTests AgentWorkbench` 报告 `Saved/Automation/AgentWorkbenchSubagentFinal/index.json`：43/44 成功；唯一失败为既有 `AgentWorkbench.P1.SettingsDefaults`（项目 `ToolTimeoutSeconds=300` 与测试期待 60 不符，与本次无关）。新增 `AgentWorkbench.Subagent.ToolRegistration` 1/1 成功，覆盖工具名识别、父模型可见性与 `bEnableSubagentTool=false` 隐藏。
 - 未验证：图形编辑器内真实 Provider 的 `task` 闭环、审批弹窗文案观感与子代理内部 UE_LOG 输出未手工验收；自动化未走真实网络，嵌套循环只经结构/注册逻辑覆盖。
+
+## 2026-10-12 Hook 注册表迁入 AgentWorkbenchEditor
+
+- 按本次要求删除独立模块 `BSHarnessHooks`，其注册表逻辑整体迁入 `AgentWorkbenchEditor` 作为模块内逻辑组件：新增 `Source/AgentWorkbenchEditor/Private/AgentHookRegistry.h` 与 `AgentHookRegistry.cpp`，公开接口与实现语义（优先级顺序、同名唯一、独占审批槽、异步 continuation 只取首次结果并回 Game Thread、取消与关闭丢弃挂起回调）与迁移前逐一对应。类型改名为 `FAgentHookRegistry` / `FAgentHook*` / `EAgentHook*`。
+- 删除 `Source/BSHarnessHooks`（`BSHarnessHooks.Build.cs`、`BSHarnessHookRegistry.h/.cpp`、`BSHarnessHooksModule.cpp`），从 `BSHarness.uplugin` 移除模块条目，从 `AgentWorkbenchEditor.Build.cs` 移除 `BSHarnessHooks` 依赖。`AgentToolWorkflow.cpp`（含 7 个内联自动化测试）与 `AgentWorkbenchSession.cpp` 的 Hook 调用点改用新组件；模块 ShutdownModule 在结束会话并注销处理器后调用 `FAgentHookRegistry::Shutdown()`，保持原模块卸载时使挂起异步回调失效的行为。
+- 该 Hook 注册表原有的 3 个回归测试在 `b77ca3c`（拆分测试文件）时被删除，本次随组件一并恢复到 `AgentHookRegistryTests.cpp`，路径由 `BSHarness.Hooks.Registry.*` 改为 `AgentWorkbench.Hooks.Registry.*`。
+- 验证：`EHVEditor Win64 Development` 完整编译链接成功（`Build.bat` 退出码 0，两次增量构建均成功）。命令行自动化 `Automation RunTests AgentWorkbench.Hooks.Registry+AgentWorkbench.ToolWorkflow` 报告 `Saved/Automation/AgentWorkbenchHookRegistryMigrated/index.json`：11/11 成功、0 失败，含恢复的 `OrderingAndLifecycle`、`AsyncContinuation`、`CancelPendingInvocation` 与既有 8 个 Workflow/Hook 回归。
+- 未验证：图形编辑器交互式窗口本轮未重启（会话内启动的编辑器进程仍加载旧 DLL），Hook 的实际审批弹窗、跨帧派发观感与热卸载行为未经手工复验；`Docs/AgentWorkbench/PROGRESS.md` 2026-09-30 记录的 `Saved/Automation/BSHarnessHooksRegistry/index.json` 对应测试文件已在 `b77ca3c` 删除，该历史记录未被修改。
+- 因运行中的编辑器占用旧 DLL 文件句柄，`Binaries/Win64/UnrealEditor-BSHarnessHooks.dll` 暂未能删除（其余 `BSHarnessHooks` 的 DLL/PDB 与 Intermediate 构建目录已清理）；该残留文件不属于源码，关闭编辑器后可删除，且模块已从 `.uplugin` 移除，不会再被加载。

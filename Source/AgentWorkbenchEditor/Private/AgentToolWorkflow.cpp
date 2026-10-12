@@ -4,7 +4,7 @@
 #include "AgentUnrealMCPBridge.h"
 #include "AgentAssetViewFollow.h"
 #include "AgentSubagentRunner.h"
-#include "BSHarnessHookRegistry.h"
+#include "AgentHookRegistry.h"
 #include "Async/Async.h"
 #include "Containers/Ticker.h"
 #include "Framework/Application/SlateApplication.h"
@@ -82,8 +82,8 @@ struct FWorkflowCall
     FTSTicker::FDelegateHandle ToolTimeoutHandle;
     TSharedPtr<FJsonObject> Arguments;
     TSharedPtr<FJsonObject> TargetArguments;
-    FBSHookToolContext Context;
-    FBSHookToolContext FrozenContext;
+    FAgentHookToolContext Context;
+    FAgentHookToolContext FrozenContext;
     FGuid InvocationId;
     FString FrozenTargetName;
     FString FrozenArgumentsJson;
@@ -111,13 +111,13 @@ struct FWorkflowCall
         switch (Invocation.Snapshot->ApprovalMode)
         {
         case EAgentApprovalMode::Smart:
-            Context.ApprovalMode = EBSHookApprovalMode::Smart;
+            Context.ApprovalMode = EAgentHookApprovalMode::Smart;
             break;
         case EAgentApprovalMode::Unrestricted:
-            Context.ApprovalMode = EBSHookApprovalMode::Unrestricted;
+            Context.ApprovalMode = EAgentHookApprovalMode::Unrestricted;
             break;
         default:
-            Context.ApprovalMode = EBSHookApprovalMode::Ask;
+            Context.ApprovalMode = EAgentHookApprovalMode::Ask;
             break;
         }
         FrozenContext = Context;
@@ -126,8 +126,8 @@ struct FWorkflowCall
 
 struct FToolHookRuntime
 {
-    TArray<FBSHookHandle> Handles;
-    FBSHookHandle ApprovalHandle;
+    TArray<FAgentHookHandle> Handles;
+    FAgentHookHandle ApprovalHandle;
     TMap<FGuid, TSharedPtr<FWorkflowCall>> ActiveCalls;
     TMap<FGuid, TSharedPtr<IAgentToolObserverState>> ViewStates;
     TSharedPtr<FAgentAssetViewFollow> ViewFollow;
@@ -293,7 +293,7 @@ bool ShouldAutomaticallyApprove(EAgentApprovalMode Mode, const FString& TargetNa
             && IsExplicitlyReadOnlyTool(DisplayName));
 }
 
-void Finish(const TSharedRef<FWorkflowCall>& Work, EBSHookToolOutcomeKind Kind,
+void Finish(const TSharedRef<FWorkflowCall>& Work, EAgentHookToolOutcomeKind Kind,
     FMCPToolResult Result)
 {
     check(IsInGameThread());
@@ -304,14 +304,14 @@ void Finish(const TSharedRef<FWorkflowCall>& Work, EBSHookToolOutcomeKind Kind,
         FTSTicker::GetCoreTicker().RemoveTicker(Work->ToolTimeoutHandle);
         Work->ToolTimeoutHandle.Reset();
     }
-    FBSHarnessHookRegistry::Get().CancelToolInvocation(Work->InvocationId);
-    FBSHookToolOutcome Outcome;
+    FAgentHookRegistry::Get().CancelToolInvocation(Work->InvocationId);
+    FAgentHookToolOutcome Outcome;
     Outcome.Kind = Kind;
     Outcome.bIsError = Result.bIsError;
     Outcome.ResultJson = SerializeArgumentsJson(Result.ToJson());
     Outcome.bApproved = Work->bApproved;
     Outcome.bWasDispatched = Work->bWasDispatched;
-    FBSHarnessHookRegistry::Get().EmitToolAfter(Work->FrozenContext, Outcome);
+    FAgentHookRegistry::Get().EmitToolAfter(Work->FrozenContext, Outcome);
     ToolHookRuntime().ActiveCalls.Remove(Work->InvocationId);
     TFunction<void(FMCPToolResult)> Complete = MoveTemp(Work->Complete);
     Complete(MoveTemp(Result));
@@ -322,20 +322,20 @@ bool StopIfCancelledOrTimedOut(const TSharedRef<FWorkflowCall>& Work)
     if (Work->bFinished) { return true; }
     if (Work->Invocation.CancellationToken->load())
     {
-        Finish(Work, EBSHookToolOutcomeKind::Cancelled,
+        Finish(Work, EAgentHookToolOutcomeKind::Cancelled,
             FMCPToolResult::Failure(TEXT("Run was cancelled before tool execution.")));
         return true;
     }
     if (Work->Invocation.RunDeadlineSeconds > 0.0
         && FPlatformTime::Seconds() >= Work->Invocation.RunDeadlineSeconds)
     {
-        Finish(Work, EBSHookToolOutcomeKind::TimedOut,
+        Finish(Work, EAgentHookToolOutcomeKind::TimedOut,
             FMCPToolResult::Failure(TEXT("Run exceeded its total timeout before tool execution.")));
         return true;
     }
     if (FPlatformTime::Seconds() >= Work->ToolDeadlineSeconds)
     {
-        Finish(Work, EBSHookToolOutcomeKind::TimedOut,
+        Finish(Work, EAgentHookToolOutcomeKind::TimedOut,
             FMCPToolResult::Failure(TEXT("Tool exceeded its total timeout before execution.")));
         return true;
     }
@@ -354,7 +354,7 @@ void DispatchTool(const TSharedRef<FWorkflowCall>& Work)
         : ToolRemainingSeconds;
     if (DispatchSeconds <= 0.0)
     {
-        Finish(Work, EBSHookToolOutcomeKind::TimedOut,
+        Finish(Work, EAgentHookToolOutcomeKind::TimedOut,
             FMCPToolResult::Failure(TEXT("Run exceeded its total timeout before tool execution.")));
         return;
     }
@@ -369,7 +369,7 @@ void DispatchTool(const TSharedRef<FWorkflowCall>& Work)
         Work->Invocation.Call.Name, Work->Arguments.ToSharedRef(),
         FinalTarget, FinalArguments, Error) || !FinalArguments)
     {
-        Finish(Work, EBSHookToolOutcomeKind::Invalid,
+        Finish(Work, EAgentHookToolOutcomeKind::Invalid,
             FMCPToolResult::ProtocolError(-32602,
                 Error.IsEmpty() ? TEXT("Tool target changed before dispatch.") : Error));
         return;
@@ -377,7 +377,7 @@ void DispatchTool(const TSharedRef<FWorkflowCall>& Work)
     if (!ValidateResolvedSchema(*Work->Invocation.Snapshot, FinalTarget,
         FinalArguments.ToSharedRef(), Error))
     {
-        Finish(Work, EBSHookToolOutcomeKind::Invalid,
+        Finish(Work, EAgentHookToolOutcomeKind::Invalid,
             FMCPToolResult::ProtocolError(-32602, Error));
         return;
     }
@@ -398,7 +398,7 @@ void DispatchTool(const TSharedRef<FWorkflowCall>& Work)
         || Work->Invocation.Snapshot->AllowedToolHandlerIds.FindRef(FinalTarget)
             != Work->FrozenContext.FrozenHandlerId)
     {
-        Finish(Work, EBSHookToolOutcomeKind::Invalid,
+        Finish(Work, EAgentHookToolOutcomeKind::Invalid,
             FMCPToolResult::ProtocolError(-32602,
                 TEXT("Tool target or arguments changed after hook review.")));
         return;
@@ -407,7 +407,7 @@ void DispatchTool(const TSharedRef<FWorkflowCall>& Work)
         && FAgentToolBridge::RequiresApproval(*Work->Invocation.Snapshot,
             Work->Invocation.Call.Name))
     {
-        Finish(Work, EBSHookToolOutcomeKind::Denied,
+        Finish(Work, EAgentHookToolOutcomeKind::Denied,
             FMCPToolResult::Failure(TEXT("Tool now requires approval before dispatch.")));
         return;
     }
@@ -425,7 +425,7 @@ void DispatchTool(const TSharedRef<FWorkflowCall>& Work)
         FAgentSubagentRunner::Run(Work->Invocation.Snapshot, Work->Invocation.CancellationToken,
             Prompt, Config, [Work](FMCPToolResult Result)
             {
-                Finish(Work, EBSHookToolOutcomeKind::Dispatched, MoveTemp(Result));
+                Finish(Work, EAgentHookToolOutcomeKind::Dispatched, MoveTemp(Result));
             });
         return;
     }
@@ -434,7 +434,7 @@ void DispatchTool(const TSharedRef<FWorkflowCall>& Work)
         Work->Arguments.ToSharedRef(), DispatchSeconds, Work->bApproved,
         [Work](FMCPToolResult Result)
         {
-            Finish(Work, EBSHookToolOutcomeKind::Dispatched, MoveTemp(Result));
+            Finish(Work, EAgentHookToolOutcomeKind::Dispatched, MoveTemp(Result));
         });
 }
 
@@ -443,7 +443,7 @@ void ReadyAndSchedule(const TSharedRef<FWorkflowCall>& Work)
     check(IsInGameThread());
     if (StopIfCancelledOrTimedOut(Work)) { return; }
     const bool bReadyNeedsFrame =
-        FBSHarnessHookRegistry::Get().EmitToolReady(Work->Context);
+        FAgentHookRegistry::Get().EmitToolReady(Work->Context);
     Work->bNeedsVisibleEditorFrame |= bReadyNeedsFrame;
     if (StopIfCancelledOrTimedOut(Work)) { return; }
 
@@ -474,19 +474,19 @@ void RunBeforeAndSchedule(const TSharedRef<FWorkflowCall>& Work)
 {
     check(IsInGameThread());
     if (StopIfCancelledOrTimedOut(Work)) { return; }
-    FBSHarnessHookRegistry::Get().RunToolBefore(Work->Context,
-        [Work](FBSHookToolBeforeResult Before)
+    FAgentHookRegistry::Get().RunToolBefore(Work->Context,
+        [Work](FAgentHookToolBeforeResult Before)
         {
             if (StopIfCancelledOrTimedOut(Work)) { return; }
             switch (Before.Decision)
             {
-            case EBSHookToolDecision::Deny:
-                Finish(Work, EBSHookToolOutcomeKind::Denied,
+            case EAgentHookToolDecision::Deny:
+                Finish(Work, EAgentHookToolOutcomeKind::Denied,
                     FMCPToolResult::Failure(Before.Reason.IsEmpty()
                         ? TEXT("Tool call was rejected before execution.") : Before.Reason));
                 return;
-            case EBSHookToolDecision::Handled:
-                Finish(Work, EBSHookToolOutcomeKind::Handled, MoveTemp(Before.Result));
+            case EAgentHookToolDecision::Handled:
+                Finish(Work, EAgentHookToolOutcomeKind::Handled, MoveTemp(Before.Result));
                 return;
             default:
                 Work->bNeedsVisibleEditorFrame = Before.bNeedsVisibleEditorFrame;
@@ -514,20 +514,20 @@ void RequestApprovalOrRunBefore(const TSharedRef<FWorkflowCall>& Work)
         return;
     }
     if (!ToolHookRuntime().ApprovalHandle.IsValid()
-        || !FBSHarnessHookRegistry::Get().IsRegistered(
+        || !FAgentHookRegistry::Get().IsRegistered(
             ToolHookRuntime().ApprovalHandle))
     {
-        Finish(Work, EBSHookToolOutcomeKind::Denied,
+        Finish(Work, EAgentHookToolOutcomeKind::Denied,
             FMCPToolResult::Failure(TEXT("Required tool approval hook is unavailable.")));
         return;
     }
-    FBSHarnessHookRegistry::Get().RequestToolApproval(Work->Context,
-        [Work](FBSHookToolApprovalResult Approval)
+    FAgentHookRegistry::Get().RequestToolApproval(Work->Context,
+        [Work](FAgentHookToolApprovalResult Approval)
         {
             if (StopIfCancelledOrTimedOut(Work)) { return; }
             if (!Approval.bApproved)
             {
-                Finish(Work, EBSHookToolOutcomeKind::Denied,
+                Finish(Work, EAgentHookToolOutcomeKind::Denied,
                     FMCPToolResult::Failure(Approval.Reason.IsEmpty()
                         ? TEXT("Tool call was not approved.") : Approval.Reason));
                 return;
@@ -543,7 +543,7 @@ void StartTool(const TSharedRef<FWorkflowCall>& Work)
     if (StopIfCancelledOrTimedOut(Work)) { return; }
     if (!ParseArgumentsJson(Work->Context.ArgumentsJson, Work->Arguments))
     {
-        Finish(Work, EBSHookToolOutcomeKind::Invalid,
+        Finish(Work, EAgentHookToolOutcomeKind::Invalid,
             FMCPToolResult::ProtocolError(-32602,
                 TEXT("Model tool arguments must be a JSON object.")));
         return;
@@ -555,7 +555,7 @@ void StartTool(const TSharedRef<FWorkflowCall>& Work)
         Work->Invocation.Call.Name, Work->Arguments.ToSharedRef(),
         TargetName, TargetArguments, TargetError) || !TargetArguments)
     {
-        Finish(Work, EBSHookToolOutcomeKind::Invalid,
+        Finish(Work, EAgentHookToolOutcomeKind::Invalid,
             FMCPToolResult::ProtocolError(-32602,
                 TargetError.IsEmpty() ? TEXT("Tool target is invalid.") : TargetError));
         return;
@@ -563,7 +563,7 @@ void StartTool(const TSharedRef<FWorkflowCall>& Work)
     if (!ValidateResolvedSchema(*Work->Invocation.Snapshot, TargetName,
         TargetArguments.ToSharedRef(), TargetError))
     {
-        Finish(Work, EBSHookToolOutcomeKind::Invalid,
+        Finish(Work, EAgentHookToolOutcomeKind::Invalid,
             FMCPToolResult::ProtocolError(-32602, TargetError));
         return;
     }
@@ -591,19 +591,19 @@ void RegisterAgentWorkbenchToolHooks()
     FToolHookRuntime& Runtime = ToolHookRuntime();
     if (!Runtime.Handles.IsEmpty()) { return; }
     Runtime.ViewFollow = MakeShared<FAgentAssetViewFollow>();
-    FBSHarnessHookRegistry& Registry = FBSHarnessHookRegistry::Get();
+    FAgentHookRegistry& Registry = FAgentHookRegistry::Get();
 
     Runtime.Handles.Add(Registry.RegisterToolBefore(
         TEXT("AgentWorkbench.BlueprintCompileDedup"), 0,
-        [](const FBSHookToolContext& Context, FBSHookToolBeforeContinuation Continue)
+        [](const FAgentHookToolContext& Context, FAgentHookToolBeforeContinuation Continue)
         {
-            FBSHookToolBeforeResult Decision;
+            FAgentHookToolBeforeResult Decision;
             TSharedPtr<FJsonObject> Arguments;
             if (ParseArgumentsJson(Context.ArgumentsJson, Arguments)
                 && IsRedundantBlueprintCompile(ToolHookRuntime().CompilationTracker,
                     Context.RunId, Context.DisplayName, *Arguments))
             {
-                Decision.Decision = EBSHookToolDecision::Handled;
+                Decision.Decision = EAgentHookToolDecision::Handled;
                 Decision.Result = FMCPToolResult::Success(
                     TEXT("Blueprint was already compiled by the successful write_graph_dsl call in this run. No second compilation was performed."));
             }
@@ -611,12 +611,12 @@ void RegisterAgentWorkbenchToolHooks()
         }));
     Runtime.ApprovalHandle = Registry.RegisterToolApproval(
         TEXT("AgentWorkbench.ToolApproval"), 0,
-        [](const FBSHookToolContext& Context, FBSHookToolApprovalContinuation Continue)
+        [](const FAgentHookToolContext& Context, FAgentHookToolApprovalContinuation Continue)
         {
-            FBSHookToolApprovalResult Decision;
-            const EAgentApprovalMode Mode = Context.ApprovalMode == EBSHookApprovalMode::Smart
+            FAgentHookToolApprovalResult Decision;
+            const EAgentApprovalMode Mode = Context.ApprovalMode == EAgentHookApprovalMode::Smart
                 ? EAgentApprovalMode::Smart
-                : Context.ApprovalMode == EBSHookApprovalMode::Unrestricted
+                : Context.ApprovalMode == EAgentHookApprovalMode::Unrestricted
                     ? EAgentApprovalMode::Unrestricted : EAgentApprovalMode::Ask;
             Decision.bApproved =
                 ShouldAutomaticallyApprove(Mode, Context.TargetName, Context.DisplayName);
@@ -630,7 +630,7 @@ void RegisterAgentWorkbenchToolHooks()
     Runtime.Handles.Add(Runtime.ApprovalHandle);
     Runtime.Handles.Add(Registry.RegisterToolReady(
         TEXT("AgentWorkbench.AssetViewFollow"), 0,
-        [](const FBSHookToolContext& Context)
+        [](const FAgentHookToolContext& Context)
         {
             FToolHookRuntime& Runtime = ToolHookRuntime();
             const TSharedPtr<FWorkflowCall> Work = FindActiveCall(Context.InvocationId);
@@ -647,9 +647,9 @@ void RegisterAgentWorkbenchToolHooks()
         }));
     Runtime.Handles.Add(Registry.RegisterToolAfter(
         TEXT("AgentWorkbench.BlueprintCompileTracker"), 0,
-        [](const FBSHookToolContext& Context, const FBSHookToolOutcome& Outcome)
+        [](const FAgentHookToolContext& Context, const FAgentHookToolOutcome& Outcome)
         {
-            if (Outcome.Kind != EBSHookToolOutcomeKind::Dispatched
+            if (Outcome.Kind != EAgentHookToolOutcomeKind::Dispatched
                 || !Outcome.bWasDispatched) { return; }
             TSharedPtr<FJsonObject> Arguments;
             if (!ParseArgumentsJson(Context.ArgumentsJson, Arguments)) { return; }
@@ -660,7 +660,7 @@ void RegisterAgentWorkbenchToolHooks()
         }));
     Runtime.Handles.Add(Registry.RegisterToolAfter(
         TEXT("AgentWorkbench.AssetViewFollow"), 100,
-        [](const FBSHookToolContext& Context, const FBSHookToolOutcome& Outcome)
+        [](const FAgentHookToolContext& Context, const FAgentHookToolOutcome& Outcome)
         {
             FToolHookRuntime& Runtime = ToolHookRuntime();
             TSharedPtr<IAgentToolObserverState> State;
@@ -669,7 +669,7 @@ void RegisterAgentWorkbenchToolHooks()
             { State = *Found; }
             Runtime.ViewStates.Remove(Context.InvocationId);
             if (!State || !Runtime.ViewFollow || !Outcome.bWasDispatched
-                || Outcome.Kind != EBSHookToolOutcomeKind::Dispatched) { return; }
+                || Outcome.Kind != EAgentHookToolOutcomeKind::Dispatched) { return; }
             const TSharedPtr<FWorkflowCall> Work = FindActiveCall(Context.InvocationId);
             if (!Work || !Work->TargetArguments) { return; }
             const TSharedRef<const FJsonObject> Arguments = Work->TargetArguments.ToSharedRef();
@@ -681,7 +681,7 @@ void RegisterAgentWorkbenchToolHooks()
         }));
     Runtime.Handles.Add(Registry.RegisterRunExited(
         TEXT("AgentWorkbench.ToolRunCleanup"), -1000000,
-        [](const FBSHookRunExitContext& Context)
+        [](const FAgentHookRunExitContext& Context)
         {
             FToolHookRuntime& Runtime = ToolHookRuntime();
             TArray<TSharedRef<FWorkflowCall>> Pending;
@@ -690,18 +690,18 @@ void RegisterAgentWorkbenchToolHooks()
                 if (Entry.Value && Entry.Value->Invocation.Snapshot->RunId == Context.RunId)
                 { Pending.Add(Entry.Value.ToSharedRef()); }
             }
-            const bool bTimedOut = Context.Reason == EBSHookRunExitReason::TimedOut;
+            const bool bTimedOut = Context.Reason == EAgentHookRunExitReason::TimedOut;
             for (const TSharedRef<FWorkflowCall>& Work : Pending)
             {
-                Finish(Work, bTimedOut ? EBSHookToolOutcomeKind::TimedOut
-                    : EBSHookToolOutcomeKind::Cancelled,
+                Finish(Work, bTimedOut ? EAgentHookToolOutcomeKind::TimedOut
+                    : EAgentHookToolOutcomeKind::Cancelled,
                     FMCPToolResult::Failure(Context.Detail.IsEmpty()
                         ? TEXT("Run exited before tool execution completed.")
                         : Context.Detail));
             }
             Runtime.CompilationTracker.AutomaticallyCompiledBlueprints.Remove(Context.RunId);
         }));
-    for (const FBSHookHandle& Handle : Runtime.Handles)
+    for (const FAgentHookHandle& Handle : Runtime.Handles)
     {
         ensureMsgf(Handle.IsValid(), TEXT("Failed to register an AgentWorkbench tool hook."));
     }
@@ -718,16 +718,16 @@ void UnregisterAgentWorkbenchToolHooks()
     }
     for (const TSharedRef<FWorkflowCall>& Work : Pending)
     {
-        Finish(Work, EBSHookToolOutcomeKind::Cancelled,
+        Finish(Work, EAgentHookToolOutcomeKind::Cancelled,
             FMCPToolResult::Failure(TEXT("Workbench tool hooks are shutting down.")));
     }
-    FBSHarnessHookRegistry& Registry = FBSHarnessHookRegistry::Get();
-    for (const FBSHookHandle& Handle : Runtime.Handles)
+    FAgentHookRegistry& Registry = FAgentHookRegistry::Get();
+    for (const FAgentHookHandle& Handle : Runtime.Handles)
     {
         if (Handle.IsValid()) { Registry.Unregister(Handle); }
     }
     Runtime.Handles.Reset();
-    Runtime.ApprovalHandle = FBSHookHandle();
+    Runtime.ApprovalHandle = FAgentHookHandle();
     Runtime.ActiveCalls.Reset();
     Runtime.ViewStates.Reset();
     Runtime.ViewFollow.Reset();
@@ -853,19 +853,19 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAgentToolWorkflowVisibleEditorFrameTest,
 
 bool FAgentToolWorkflowVisibleEditorFrameTest::RunTest(const FString& Parameters)
 {
-    FBSHarnessHookRegistry& Hooks = FBSHarnessHookRegistry::Get();
+    FAgentHookRegistry& Hooks = FAgentHookRegistry::Get();
     const TSharedRef<FHookTestObservation> Observed = MakeShared<FHookTestObservation>();
-    const FBSHookHandle Ready = Hooks.RegisterToolReady(
+    const FAgentHookHandle Ready = Hooks.RegisterToolReady(
         TEXT("AgentWorkbench.Test.VisibleFrame"), -100,
-        [Observed](const FBSHookToolContext& Context)
+        [Observed](const FAgentHookToolContext& Context)
         {
             if (Context.ToolCallId != TEXT("visible-frame-call")) { return false; }
             ++Observed->BeforeCount;
             return true;
         });
-    const FBSHookHandle After = Hooks.RegisterToolAfter(
+    const FAgentHookHandle After = Hooks.RegisterToolAfter(
         TEXT("AgentWorkbench.Test.VisibleFrame"), -100,
-        [Observed](const FBSHookToolContext& Context, const FBSHookToolOutcome&)
+        [Observed](const FAgentHookToolContext& Context, const FAgentHookToolOutcome&)
         {
             if (Context.ToolCallId == TEXT("visible-frame-call")) { ++Observed->AfterCount; }
         });
@@ -901,8 +901,8 @@ bool FAgentToolWorkflowVisibleEditorFrameTest::RunTest(const FString& Parameters
         TestTrue(TEXT("Tool completes after the frame"), Observed->bCompleted);
         TestFalse(TEXT("Deferred tool succeeds"), Observed->bFailed);
         TestEqual(TEXT("Post-execution hook runs"), Observed->AfterCount, 1);
-        FBSHarnessHookRegistry::Get().Unregister(Ready);
-        FBSHarnessHookRegistry::Get().Unregister(After);
+        FAgentHookRegistry::Get().Unregister(Ready);
+        FAgentHookRegistry::Get().Unregister(After);
         return true;
     }));
     return true;
@@ -965,20 +965,20 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAgentToolWorkflowObserverTest,
 
 bool FAgentToolWorkflowObserverTest::RunTest(const FString& Parameters)
 {
-    FBSHarnessHookRegistry& Hooks = FBSHarnessHookRegistry::Get();
+    FAgentHookRegistry& Hooks = FAgentHookRegistry::Get();
     const TSharedRef<FHookTestObservation> Observed = MakeShared<FHookTestObservation>();
-    const FBSHookHandle Ready = Hooks.RegisterToolReady(
+    const FAgentHookHandle Ready = Hooks.RegisterToolReady(
         TEXT("AgentWorkbench.Test.ToolReady"), -100,
-        [Observed](const FBSHookToolContext& Context)
+        [Observed](const FAgentHookToolContext& Context)
         {
             if (Context.ToolCallId != TEXT("catalog-call")) { return false; }
             ++Observed->BeforeCount;
             Observed->SeenName = Context.TargetName;
             return false;
         });
-    const FBSHookHandle After = Hooks.RegisterToolAfter(
+    const FAgentHookHandle After = Hooks.RegisterToolAfter(
         TEXT("AgentWorkbench.Test.ToolAfter"), -100,
-        [Observed](const FBSHookToolContext& Context, const FBSHookToolOutcome&)
+        [Observed](const FAgentHookToolContext& Context, const FAgentHookToolOutcome&)
         {
             if (Context.ToolCallId != TEXT("catalog-call")) { return; }
             ++Observed->AfterCount;
@@ -1025,20 +1025,20 @@ bool FAgentToolWorkflowCancelBeforeDispatchTest::RunTest(const FString& Paramete
 {
     struct FPendingState
     {
-        FBSHookToolBeforeContinuation Continue;
+        FAgentHookToolBeforeContinuation Continue;
         int32 Completions = 0;
         bool bError = false;
     };
     const TSharedRef<FPendingState> Pending = MakeShared<FPendingState>();
-    FBSHarnessHookRegistry& Hooks = FBSHarnessHookRegistry::Get();
-    const FBSHookHandle Before = Hooks.RegisterToolBefore(
+    FAgentHookRegistry& Hooks = FAgentHookRegistry::Get();
+    const FAgentHookHandle Before = Hooks.RegisterToolBefore(
         TEXT("AgentWorkbench.Test.DeferredBefore"), -100,
-        [Pending](const FBSHookToolContext& Context,
-            FBSHookToolBeforeContinuation Continue)
+        [Pending](const FAgentHookToolContext& Context,
+            FAgentHookToolBeforeContinuation Continue)
         {
             if (Context.ToolCallId == TEXT("held-call"))
             { Pending->Continue = MoveTemp(Continue); }
-            else { Continue(FBSHookToolBeforeResult()); }
+            else { Continue(FAgentHookToolBeforeResult()); }
         });
     if (!TestTrue(TEXT("Deferred hook registered"), Before.IsValid())) { return false; }
     const TSharedRef<FAgentToolWorkflow> Workflow = MakeShared<FAgentToolWorkflow>();
@@ -1060,8 +1060,8 @@ bool FAgentToolWorkflowCancelBeforeDispatchTest::RunTest(const FString& Paramete
     TestTrue(TEXT("Before hook holds the proposal"), static_cast<bool>(Pending->Continue));
     TestEqual(TEXT("No tool result before hook completes"), Pending->Completions, 0);
     Cancelled->store(true);
-    FBSHookToolBeforeContinuation Continue = MoveTemp(Pending->Continue);
-    if (Continue) { Continue(FBSHookToolBeforeResult()); }
+    FAgentHookToolBeforeContinuation Continue = MoveTemp(Pending->Continue);
+    if (Continue) { Continue(FAgentHookToolBeforeResult()); }
     const double Deadline = FPlatformTime::Seconds() + 2.0;
     ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand(
         [this, Pending, Before, Deadline]()
@@ -1069,7 +1069,7 @@ bool FAgentToolWorkflowCancelBeforeDispatchTest::RunTest(const FString& Paramete
         if (Pending->Completions == 0 && FPlatformTime::Seconds() < Deadline) { return false; }
         TestEqual(TEXT("Cancelled proposal completes once"), Pending->Completions, 1);
         TestTrue(TEXT("Cancelled proposal is an error result"), Pending->bError);
-        FBSHarnessHookRegistry::Get().Unregister(Before);
+        FAgentHookRegistry::Get().Unregister(Before);
         return true;
     }));
     return true;
@@ -1083,27 +1083,27 @@ bool FAgentToolWorkflowHookTimeoutTest::RunTest(const FString& Parameters)
 {
     struct FPendingState
     {
-        FBSHookToolBeforeContinuation Continue;
+        FAgentHookToolBeforeContinuation Continue;
         int32 AfterCount = 0;
         int32 CompletionCount = 0;
         bool bWasDispatched = false;
-        EBSHookToolOutcomeKind Kind = EBSHookToolOutcomeKind::Invalid;
+        EAgentHookToolOutcomeKind Kind = EAgentHookToolOutcomeKind::Invalid;
     };
     const TSharedRef<FPendingState> Pending = MakeShared<FPendingState>();
-    FBSHarnessHookRegistry& Hooks = FBSHarnessHookRegistry::Get();
-    const FBSHookHandle Before = Hooks.RegisterToolBefore(
+    FAgentHookRegistry& Hooks = FAgentHookRegistry::Get();
+    const FAgentHookHandle Before = Hooks.RegisterToolBefore(
         TEXT("AgentWorkbench.Test.HeldUntilTimeout"), -100,
-        [Pending](const FBSHookToolContext& Context,
-            FBSHookToolBeforeContinuation Continue)
+        [Pending](const FAgentHookToolContext& Context,
+            FAgentHookToolBeforeContinuation Continue)
         {
             if (Context.ToolCallId == TEXT("timeout-held-call"))
             { Pending->Continue = MoveTemp(Continue); }
-            else { Continue(FBSHookToolBeforeResult()); }
+            else { Continue(FAgentHookToolBeforeResult()); }
         });
-    const FBSHookHandle After = Hooks.RegisterToolAfter(
+    const FAgentHookHandle After = Hooks.RegisterToolAfter(
         TEXT("AgentWorkbench.Test.HeldUntilTimeout"), -100,
-        [Pending](const FBSHookToolContext& Context,
-            const FBSHookToolOutcome& Outcome)
+        [Pending](const FAgentHookToolContext& Context,
+            const FAgentHookToolOutcome& Outcome)
         {
             if (Context.ToolCallId != TEXT("timeout-held-call")) { return; }
             ++Pending->AfterCount;
@@ -1141,16 +1141,16 @@ bool FAgentToolWorkflowHookTimeoutTest::RunTest(const FString& Parameters)
         TestEqual(TEXT("Timed out tool completes once"), Pending->CompletionCount, 1);
         TestEqual(TEXT("Timed out tool emits one After event"), Pending->AfterCount, 1);
         TestTrue(TEXT("Timeout outcome is reported"),
-            Pending->Kind == EBSHookToolOutcomeKind::TimedOut);
+            Pending->Kind == EAgentHookToolOutcomeKind::TimedOut);
         TestFalse(TEXT("Held tool was never dispatched"), Pending->bWasDispatched);
-        FBSHookToolBeforeContinuation Late = MoveTemp(Pending->Continue);
-        if (Late) { Late(FBSHookToolBeforeResult()); }
+        FAgentHookToolBeforeContinuation Late = MoveTemp(Pending->Continue);
+        if (Late) { Late(FAgentHookToolBeforeResult()); }
         TestEqual(TEXT("Late continuation cannot complete again"),
             Pending->CompletionCount, 1);
         TestEqual(TEXT("Late continuation cannot emit another After event"),
             Pending->AfterCount, 1);
-        FBSHarnessHookRegistry::Get().Unregister(Before);
-        FBSHarnessHookRegistry::Get().Unregister(After);
+        FAgentHookRegistry::Get().Unregister(Before);
+        FAgentHookRegistry::Get().Unregister(After);
         return true;
     }));
     return true;

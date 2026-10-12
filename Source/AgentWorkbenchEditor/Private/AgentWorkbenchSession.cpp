@@ -6,7 +6,7 @@
 #include "AgentModelClient.h"
 #include "AgentToolBridge.h"
 #include "AgentToolWorkflow.h"
-#include "BSHarnessHookRegistry.h"
+#include "AgentHookRegistry.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Containers/Ticker.h"
 #include "HAL/FileManager.h"
@@ -45,14 +45,14 @@ bool StartModelRequest(const TSharedRef<FAgentSession>& Session, FString& OutErr
 }
 
 void NotifyRunExited(const FAgentSession& Session, const FGuid& RunId,
-    EBSHookRunExitReason Reason, const FString& Detail = FString())
+    EAgentHookRunExitReason Reason, const FString& Detail = FString())
 {
-    FBSHookRunExitContext Context;
+    FAgentHookRunExitContext Context;
     Context.SessionId = Session.SessionId;
     Context.RunId = RunId;
     Context.Reason = Reason;
     Context.Detail = Detail;
-    FBSHarnessHookRegistry::Get().EmitRunExited(Context);
+    FAgentHookRegistry::Get().EmitRunExited(Context);
 }
 }
 
@@ -146,7 +146,7 @@ bool FAgentSession::BeginRun(FString& OutError)
     Current.IncludedAssets = Snapshot.IncludedAssets;
     Snapshot.Conversation.Add(MoveTemp(Current));
 
-    FBSHookPromptContext PromptContext;
+    FAgentHookPromptContext PromptContext;
     PromptContext.SessionId = Snapshot.SessionId;
     PromptContext.RunId = Snapshot.RunId;
     PromptContext.UserPrompt = Snapshot.UserInput;
@@ -155,9 +155,9 @@ bool FAgentSession::BeginRun(FString& OutError)
     {
         PromptContext.CandidatePaths.Add(Asset.ObjectPath);
     }
-    const FBSHookPromptContext OriginalPrompt = PromptContext;
+    const FAgentHookPromptContext OriginalPrompt = PromptContext;
     bPromptHookActive = true;
-    const bool bAccepted = FBSHarnessHookRegistry::Get().EmitPromptSubmitting(PromptContext, OutError);
+    const bool bAccepted = FAgentHookRegistry::Get().EmitPromptSubmitting(PromptContext, OutError);
     bPromptHookActive = false;
     if (!bAccepted)
     {
@@ -215,7 +215,7 @@ bool FAgentSession::BeginRun(FString& OutError)
     // A validated send has now started a Run, so this Session becomes history.
     // Keep this submission single-owner if a post-submit handler calls back into the Session.
     bPromptHookActive = true;
-    FBSHarnessHookRegistry::Get().EmitPromptSubmitted(PromptContext);
+    FAgentHookRegistry::Get().EmitPromptSubmitted(PromptContext);
     Touch();
     bPromptHookActive = false;
     return true;
@@ -267,7 +267,7 @@ void FAgentSession::CompleteRun(const FGuid& RunId, const FString& ReplyText)
     Runner.State = EAgentRunState::Completed;
     AddEvent(EAgentEventType::RunCompleted, RunId, TEXT("任务完成"));
     Touch();
-    NotifyRunExited(*this, RunId, EBSHookRunExitReason::Completed);
+    NotifyRunExited(*this, RunId, EAgentHookRunExitReason::Completed);
 }
 
 void FAgentSession::FailRun(const FGuid& RunId, const FString& Error, bool bTimedOut)
@@ -290,7 +290,7 @@ void FAgentSession::FailRun(const FGuid& RunId, const FString& Error, bool bTime
     AddEvent(EAgentEventType::RunFailed, RunId, TEXT("任务失败"), Error);
     Touch();
     NotifyRunExited(*this, RunId,
-        bTimedOut ? EBSHookRunExitReason::TimedOut : EBSHookRunExitReason::Failed, Error);
+        bTimedOut ? EAgentHookRunExitReason::TimedOut : EAgentHookRunExitReason::Failed, Error);
 }
 
 void FAgentSession::OnModelResponse(const FGuid& RunId, const FGuid& RequestId,
@@ -441,7 +441,7 @@ void FAgentSession::CancelRun()
         Runner.Cancel();
         AddEvent(EAgentEventType::RunCancelled, RunId, TEXT("Run cancelled"));
         Touch();
-        NotifyRunExited(*this, RunId, EBSHookRunExitReason::Cancelled);
+        NotifyRunExited(*this, RunId, EAgentHookRunExitReason::Cancelled);
     }
 }
 
@@ -730,7 +730,7 @@ void FAgentSessionManager::Shutdown()
         {
             const FGuid RunId = Session->Runner.CurrentRunId;
             Session->Runner.Cancel();
-            NotifyRunExited(*Session, RunId, EBSHookRunExitReason::Closed);
+            NotifyRunExited(*Session, RunId, EAgentHookRunExitReason::Closed);
         }
     }
     for (auto& Pair : Windows)

@@ -45,7 +45,7 @@ public:
         const TSharedPtr<IAgentToolObserverState>& State, const FMCPToolResult& Result) = 0;
 };
 
-/** Resolves and executes a call; lifecycle extensions live in BSHarnessHooks. */
+/** Resolves and executes a call; lifecycle extensions live in AgentHookRegistry.h. */
 class FAgentToolWorkflow
 {
 public:

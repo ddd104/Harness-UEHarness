@@ -1,4 +1,4 @@
-#include "BSHarnessHookRegistry.h"
+#include "AgentHookRegistry.h"
 
 #include "Async/Async.h"
 #include "Misc/AssertionMacros.h"
@@ -9,12 +9,12 @@ namespace
 template<typename THandler>
 struct THookEntry
 {
-    FBSHookHandle Handle;
+    FAgentHookHandle Handle;
     FName Name;
     int32 Priority;
     THandler Handler;
 
-    THookEntry(FBSHookHandle InHandle, FName InName, int32 InPriority, THandler InHandler)
+    THookEntry(FAgentHookHandle InHandle, FName InName, int32 InPriority, THandler InHandler)
         : Handle(InHandle), Name(InName), Priority(InPriority), Handler(MoveTemp(InHandler)) {}
 };
 
@@ -22,7 +22,7 @@ template<typename THandler>
 using THookEntries = TArray<TSharedPtr<THookEntry<THandler>>>;
 
 template<typename THandler>
-FBSHookHandle AddEntry(THookEntries<THandler>& Entries, EBSHookPoint Point,
+FAgentHookHandle AddEntry(THookEntries<THandler>& Entries, EAgentHookPoint Point,
     uint64& NextId, FName Name, int32 Priority, THandler Handler, bool bExclusive = false)
 {
     check(IsInGameThread());
@@ -34,7 +34,7 @@ FBSHookHandle AddEntry(THookEntries<THandler>& Entries, EBSHookPoint Point,
     {
         if (Entry->Name == Name) { return {}; }
     }
-    const FBSHookHandle Handle{Point, NextId++};
+    const FAgentHookHandle Handle{Point, NextId++};
     Entries.Add(MakeShared<THookEntry<THandler>>(Handle, Name, Priority, MoveTemp(Handler)));
     Entries.Sort([](const TSharedPtr<THookEntry<THandler>>& A,
         const TSharedPtr<THookEntry<THandler>>& B)
@@ -76,9 +76,9 @@ TArray<uint64> SnapshotIds(const THookEntries<THandler>& Entries)
 
 struct FToolBeforeState
 {
-    FBSHookToolContext Context;
+    FAgentHookToolContext Context;
     TArray<uint64> HandlerIds;
-    FBSHookToolBeforeCompletion Complete;
+    FAgentHookToolBeforeCompletion Complete;
     TFunction<void()> Advance;
     int32 Index = 0;
     bool bFinished = false;
@@ -88,7 +88,7 @@ struct FToolBeforeState
 struct FToolApprovalState
 {
     FGuid InvocationId;
-    FBSHookToolApprovalCompletion Complete;
+    FAgentHookToolApprovalCompletion Complete;
     bool bFinished = false;
 };
 
@@ -108,115 +108,115 @@ void RemovePendingState(TPendingToolStates<TState>& Pending, const FGuid& Invoca
 }
 }
 
-struct FBSHarnessHookRegistry::FImpl
+struct FAgentHookRegistry::FImpl
 {
     uint64 NextId = 1;
     // Async completions must not enter the registry after module shutdown.
     TSharedPtr<bool, ESPMode::ThreadSafe> Lifetime = MakeShared<bool, ESPMode::ThreadSafe>(true);
-    THookEntries<FBSHookPromptSubmittingHandler> PromptSubmitting;
-    THookEntries<FBSHookPromptSubmittedHandler> PromptSubmitted;
-    THookEntries<FBSHookToolBeforeHandler> ToolBefore;
-    THookEntries<FBSHookToolApprovalHandler> ToolApproval;
-    THookEntries<FBSHookToolReadyHandler> ToolReady;
-    THookEntries<FBSHookToolAfterHandler> ToolAfter;
-    THookEntries<FBSHookRunExitedHandler> RunExited;
+    THookEntries<FAgentHookPromptSubmittingHandler> PromptSubmitting;
+    THookEntries<FAgentHookPromptSubmittedHandler> PromptSubmitted;
+    THookEntries<FAgentHookToolBeforeHandler> ToolBefore;
+    THookEntries<FAgentHookToolApprovalHandler> ToolApproval;
+    THookEntries<FAgentHookToolReadyHandler> ToolReady;
+    THookEntries<FAgentHookToolAfterHandler> ToolAfter;
+    THookEntries<FAgentHookRunExitedHandler> RunExited;
     TPendingToolStates<FToolBeforeState> PendingBefore;
     TPendingToolStates<FToolApprovalState> PendingApproval;
 };
 
-FBSHarnessHookRegistry::FBSHarnessHookRegistry() : Impl(MakeUnique<FImpl>()) {}
-FBSHarnessHookRegistry::~FBSHarnessHookRegistry() = default;
+FAgentHookRegistry::FAgentHookRegistry() : Impl(MakeUnique<FImpl>()) {}
+FAgentHookRegistry::~FAgentHookRegistry() = default;
 
-FBSHarnessHookRegistry& FBSHarnessHookRegistry::Get()
+FAgentHookRegistry& FAgentHookRegistry::Get()
 {
-    static FBSHarnessHookRegistry Registry;
+    static FAgentHookRegistry Registry;
     return Registry;
 }
 
-FBSHookHandle FBSHarnessHookRegistry::RegisterPromptSubmitting(FName Name, int32 Priority,
-    FBSHookPromptSubmittingHandler Handler)
+FAgentHookHandle FAgentHookRegistry::RegisterPromptSubmitting(FName Name, int32 Priority,
+    FAgentHookPromptSubmittingHandler Handler)
 {
-    return AddEntry(Impl->PromptSubmitting, EBSHookPoint::PromptSubmitting,
+    return AddEntry(Impl->PromptSubmitting, EAgentHookPoint::PromptSubmitting,
         Impl->NextId, Name, Priority, MoveTemp(Handler));
 }
 
-FBSHookHandle FBSHarnessHookRegistry::RegisterPromptSubmitted(FName Name, int32 Priority,
-    FBSHookPromptSubmittedHandler Handler)
+FAgentHookHandle FAgentHookRegistry::RegisterPromptSubmitted(FName Name, int32 Priority,
+    FAgentHookPromptSubmittedHandler Handler)
 {
-    return AddEntry(Impl->PromptSubmitted, EBSHookPoint::PromptSubmitted,
+    return AddEntry(Impl->PromptSubmitted, EAgentHookPoint::PromptSubmitted,
         Impl->NextId, Name, Priority, MoveTemp(Handler));
 }
 
-FBSHookHandle FBSHarnessHookRegistry::RegisterToolBefore(FName Name, int32 Priority,
-    FBSHookToolBeforeHandler Handler)
+FAgentHookHandle FAgentHookRegistry::RegisterToolBefore(FName Name, int32 Priority,
+    FAgentHookToolBeforeHandler Handler)
 {
-    return AddEntry(Impl->ToolBefore, EBSHookPoint::ToolBefore,
+    return AddEntry(Impl->ToolBefore, EAgentHookPoint::ToolBefore,
         Impl->NextId, Name, Priority, MoveTemp(Handler));
 }
 
-FBSHookHandle FBSHarnessHookRegistry::RegisterToolApproval(FName Name, int32 Priority,
-    FBSHookToolApprovalHandler Handler)
+FAgentHookHandle FAgentHookRegistry::RegisterToolApproval(FName Name, int32 Priority,
+    FAgentHookToolApprovalHandler Handler)
 {
-    return AddEntry(Impl->ToolApproval, EBSHookPoint::ToolApproval,
+    return AddEntry(Impl->ToolApproval, EAgentHookPoint::ToolApproval,
         Impl->NextId, Name, Priority, MoveTemp(Handler), true);
 }
 
-FBSHookHandle FBSHarnessHookRegistry::RegisterToolReady(FName Name, int32 Priority,
-    FBSHookToolReadyHandler Handler)
+FAgentHookHandle FAgentHookRegistry::RegisterToolReady(FName Name, int32 Priority,
+    FAgentHookToolReadyHandler Handler)
 {
-    return AddEntry(Impl->ToolReady, EBSHookPoint::ToolReady,
+    return AddEntry(Impl->ToolReady, EAgentHookPoint::ToolReady,
         Impl->NextId, Name, Priority, MoveTemp(Handler));
 }
 
-FBSHookHandle FBSHarnessHookRegistry::RegisterToolAfter(FName Name, int32 Priority,
-    FBSHookToolAfterHandler Handler)
+FAgentHookHandle FAgentHookRegistry::RegisterToolAfter(FName Name, int32 Priority,
+    FAgentHookToolAfterHandler Handler)
 {
-    return AddEntry(Impl->ToolAfter, EBSHookPoint::ToolAfter,
+    return AddEntry(Impl->ToolAfter, EAgentHookPoint::ToolAfter,
         Impl->NextId, Name, Priority, MoveTemp(Handler));
 }
 
-FBSHookHandle FBSHarnessHookRegistry::RegisterRunExited(FName Name, int32 Priority,
-    FBSHookRunExitedHandler Handler)
+FAgentHookHandle FAgentHookRegistry::RegisterRunExited(FName Name, int32 Priority,
+    FAgentHookRunExitedHandler Handler)
 {
-    return AddEntry(Impl->RunExited, EBSHookPoint::RunExited,
+    return AddEntry(Impl->RunExited, EAgentHookPoint::RunExited,
         Impl->NextId, Name, Priority, MoveTemp(Handler));
 }
 
-bool FBSHarnessHookRegistry::Unregister(FBSHookHandle Handle)
+bool FAgentHookRegistry::Unregister(FAgentHookHandle Handle)
 {
     check(IsInGameThread());
     if (!Handle.IsValid()) { return false; }
     switch (Handle.Point)
     {
-    case EBSHookPoint::PromptSubmitting: return RemoveEntry(Impl->PromptSubmitting, Handle.Id);
-    case EBSHookPoint::PromptSubmitted: return RemoveEntry(Impl->PromptSubmitted, Handle.Id);
-    case EBSHookPoint::ToolBefore: return RemoveEntry(Impl->ToolBefore, Handle.Id);
-    case EBSHookPoint::ToolApproval: return RemoveEntry(Impl->ToolApproval, Handle.Id);
-    case EBSHookPoint::ToolReady: return RemoveEntry(Impl->ToolReady, Handle.Id);
-    case EBSHookPoint::ToolAfter: return RemoveEntry(Impl->ToolAfter, Handle.Id);
-    case EBSHookPoint::RunExited: return RemoveEntry(Impl->RunExited, Handle.Id);
+    case EAgentHookPoint::PromptSubmitting: return RemoveEntry(Impl->PromptSubmitting, Handle.Id);
+    case EAgentHookPoint::PromptSubmitted: return RemoveEntry(Impl->PromptSubmitted, Handle.Id);
+    case EAgentHookPoint::ToolBefore: return RemoveEntry(Impl->ToolBefore, Handle.Id);
+    case EAgentHookPoint::ToolApproval: return RemoveEntry(Impl->ToolApproval, Handle.Id);
+    case EAgentHookPoint::ToolReady: return RemoveEntry(Impl->ToolReady, Handle.Id);
+    case EAgentHookPoint::ToolAfter: return RemoveEntry(Impl->ToolAfter, Handle.Id);
+    case EAgentHookPoint::RunExited: return RemoveEntry(Impl->RunExited, Handle.Id);
     }
     return false;
 }
 
-bool FBSHarnessHookRegistry::IsRegistered(FBSHookHandle Handle) const
+bool FAgentHookRegistry::IsRegistered(FAgentHookHandle Handle) const
 {
     check(IsInGameThread());
     if (!Handle.IsValid()) { return false; }
     switch (Handle.Point)
     {
-    case EBSHookPoint::PromptSubmitting: return FindEntry(Impl->PromptSubmitting, Handle.Id).IsValid();
-    case EBSHookPoint::PromptSubmitted: return FindEntry(Impl->PromptSubmitted, Handle.Id).IsValid();
-    case EBSHookPoint::ToolBefore: return FindEntry(Impl->ToolBefore, Handle.Id).IsValid();
-    case EBSHookPoint::ToolApproval: return FindEntry(Impl->ToolApproval, Handle.Id).IsValid();
-    case EBSHookPoint::ToolReady: return FindEntry(Impl->ToolReady, Handle.Id).IsValid();
-    case EBSHookPoint::ToolAfter: return FindEntry(Impl->ToolAfter, Handle.Id).IsValid();
-    case EBSHookPoint::RunExited: return FindEntry(Impl->RunExited, Handle.Id).IsValid();
+    case EAgentHookPoint::PromptSubmitting: return FindEntry(Impl->PromptSubmitting, Handle.Id).IsValid();
+    case EAgentHookPoint::PromptSubmitted: return FindEntry(Impl->PromptSubmitted, Handle.Id).IsValid();
+    case EAgentHookPoint::ToolBefore: return FindEntry(Impl->ToolBefore, Handle.Id).IsValid();
+    case EAgentHookPoint::ToolApproval: return FindEntry(Impl->ToolApproval, Handle.Id).IsValid();
+    case EAgentHookPoint::ToolReady: return FindEntry(Impl->ToolReady, Handle.Id).IsValid();
+    case EAgentHookPoint::ToolAfter: return FindEntry(Impl->ToolAfter, Handle.Id).IsValid();
+    case EAgentHookPoint::RunExited: return FindEntry(Impl->RunExited, Handle.Id).IsValid();
     }
     return false;
 }
 
-bool FBSHarnessHookRegistry::EmitPromptSubmitting(FBSHookPromptContext& Context, FString& OutReason)
+bool FAgentHookRegistry::EmitPromptSubmitting(FAgentHookPromptContext& Context, FString& OutReason)
 {
     check(IsInGameThread());
     OutReason.Empty();
@@ -252,7 +252,7 @@ bool FBSHarnessHookRegistry::EmitPromptSubmitting(FBSHookPromptContext& Context,
     return true;
 }
 
-void FBSHarnessHookRegistry::EmitPromptSubmitted(const FBSHookPromptContext& Context)
+void FAgentHookRegistry::EmitPromptSubmitted(const FAgentHookPromptContext& Context)
 {
     check(IsInGameThread());
     for (const uint64 Id : SnapshotIds(Impl->PromptSubmitted))
@@ -262,8 +262,8 @@ void FBSHarnessHookRegistry::EmitPromptSubmitted(const FBSHookPromptContext& Con
     }
 }
 
-void FBSHarnessHookRegistry::RunToolBefore(const FBSHookToolContext& Context,
-    FBSHookToolBeforeCompletion Complete)
+void FAgentHookRegistry::RunToolBefore(const FAgentHookToolContext& Context,
+    FAgentHookToolBeforeCompletion Complete)
 {
     check(IsInGameThread());
     if (!Complete) { return; }
@@ -290,7 +290,7 @@ void FBSHarnessHookRegistry::RunToolBefore(const FBSHookToolContext& Context,
                 MakeShared<std::atomic<bool>, ESPMode::ThreadSafe>(false);
             Entry->Handler(Current->Context,
                 [this, WeakLifetime, State = Current.ToSharedRef(), HandlerId, Continued]
-                    (FBSHookToolBeforeResult Result) mutable
+                    (FAgentHookToolBeforeResult Result) mutable
                 {
                     if (Continued->exchange(true)) { return; }
                     auto Deliver = [this, WeakLifetime, State, HandlerId,
@@ -306,7 +306,7 @@ void FBSHarnessHookRegistry::RunToolBefore(const FBSHookToolContext& Context,
                             return;
                         }
                         State->bNeedsVisibleEditorFrame |= Result.bNeedsVisibleEditorFrame;
-                        if (Result.Decision == EBSHookToolDecision::Continue)
+                        if (Result.Decision == EAgentHookToolDecision::Continue)
                         {
                             ++State->Index;
                             State->Advance();
@@ -316,7 +316,7 @@ void FBSHarnessHookRegistry::RunToolBefore(const FBSHookToolContext& Context,
                         Result.bNeedsVisibleEditorFrame = State->bNeedsVisibleEditorFrame;
                         RemovePendingState(Impl->PendingBefore,
                             State->Context.InvocationId, &State.Get());
-                        FBSHookToolBeforeCompletion Completion = MoveTemp(State->Complete);
+                        FAgentHookToolBeforeCompletion Completion = MoveTemp(State->Complete);
                         Completion(MoveTemp(Result));
                     };
                     if (IsInGameThread()) { Deliver(); }
@@ -325,24 +325,24 @@ void FBSHarnessHookRegistry::RunToolBefore(const FBSHookToolContext& Context,
             return;
         }
         Current->bFinished = true;
-        FBSHookToolBeforeResult Result;
+        FAgentHookToolBeforeResult Result;
         Result.bNeedsVisibleEditorFrame = Current->bNeedsVisibleEditorFrame;
         RemovePendingState(Impl->PendingBefore,
             Current->Context.InvocationId, Current.Get());
-        FBSHookToolBeforeCompletion Completion = MoveTemp(Current->Complete);
+        FAgentHookToolBeforeCompletion Completion = MoveTemp(Current->Complete);
         Completion(MoveTemp(Result));
     };
     State->Advance();
 }
 
-void FBSHarnessHookRegistry::RequestToolApproval(const FBSHookToolContext& Context,
-    FBSHookToolApprovalCompletion Complete)
+void FAgentHookRegistry::RequestToolApproval(const FAgentHookToolContext& Context,
+    FAgentHookToolApprovalCompletion Complete)
 {
     check(IsInGameThread());
     if (!Complete) { return; }
     if (Impl->ToolApproval.IsEmpty())
     {
-        FBSHookToolApprovalResult Result;
+        FAgentHookToolApprovalResult Result;
         Result.Reason = TEXT("Required tool approval handler is not registered.");
         Complete(MoveTemp(Result));
         return;
@@ -359,7 +359,7 @@ void FBSHarnessHookRegistry::RequestToolApproval(const FBSHookToolContext& Conte
     Impl->PendingApproval.FindOrAdd(Context.InvocationId).Add(State);
     Entry->Handler(Context,
         [this, WeakLifetime, HandlerId, Continued, State]
-            (FBSHookToolApprovalResult Result) mutable
+            (FAgentHookToolApprovalResult Result) mutable
         {
             if (Continued->exchange(true)) { return; }
             auto Deliver = [this, WeakLifetime, HandlerId, State,
@@ -375,7 +375,7 @@ void FBSHarnessHookRegistry::RequestToolApproval(const FBSHookToolContext& Conte
                 State->bFinished = true;
                 RemovePendingState(Impl->PendingApproval,
                     State->InvocationId, &State.Get());
-                FBSHookToolApprovalCompletion Callback = MoveTemp(State->Complete);
+                FAgentHookToolApprovalCompletion Callback = MoveTemp(State->Complete);
                 Callback(MoveTemp(Result));
             };
             if (IsInGameThread()) { Deliver(); }
@@ -383,7 +383,7 @@ void FBSHarnessHookRegistry::RequestToolApproval(const FBSHookToolContext& Conte
         });
 }
 
-void FBSHarnessHookRegistry::CancelToolInvocation(FGuid InvocationId)
+void FAgentHookRegistry::CancelToolInvocation(FGuid InvocationId)
 {
     check(IsInGameThread());
     if (TArray<TSharedPtr<FToolBeforeState, ESPMode::ThreadSafe>>* States =
@@ -392,7 +392,7 @@ void FBSHarnessHookRegistry::CancelToolInvocation(FGuid InvocationId)
         for (const TSharedPtr<FToolBeforeState, ESPMode::ThreadSafe>& State : *States)
         {
             State->bFinished = true;
-            State->Complete = FBSHookToolBeforeCompletion();
+            State->Complete = FAgentHookToolBeforeCompletion();
         }
         Impl->PendingBefore.Remove(InvocationId);
     }
@@ -402,13 +402,13 @@ void FBSHarnessHookRegistry::CancelToolInvocation(FGuid InvocationId)
         for (const TSharedPtr<FToolApprovalState, ESPMode::ThreadSafe>& State : *States)
         {
             State->bFinished = true;
-            State->Complete = FBSHookToolApprovalCompletion();
+            State->Complete = FAgentHookToolApprovalCompletion();
         }
         Impl->PendingApproval.Remove(InvocationId);
     }
 }
 
-bool FBSHarnessHookRegistry::EmitToolReady(const FBSHookToolContext& Context)
+bool FAgentHookRegistry::EmitToolReady(const FAgentHookToolContext& Context)
 {
     check(IsInGameThread());
     bool bNeedsVisibleEditorFrame = false;
@@ -420,8 +420,8 @@ bool FBSHarnessHookRegistry::EmitToolReady(const FBSHookToolContext& Context)
     return bNeedsVisibleEditorFrame;
 }
 
-void FBSHarnessHookRegistry::EmitToolAfter(const FBSHookToolContext& Context,
-    const FBSHookToolOutcome& Outcome)
+void FAgentHookRegistry::EmitToolAfter(const FAgentHookToolContext& Context,
+    const FAgentHookToolOutcome& Outcome)
 {
     check(IsInGameThread());
     for (const uint64 Id : SnapshotIds(Impl->ToolAfter))
@@ -431,7 +431,7 @@ void FBSHarnessHookRegistry::EmitToolAfter(const FBSHookToolContext& Context,
     }
 }
 
-void FBSHarnessHookRegistry::EmitRunExited(const FBSHookRunExitContext& Context)
+void FAgentHookRegistry::EmitRunExited(const FAgentHookRunExitContext& Context)
 {
     check(IsInGameThread());
     for (const uint64 Id : SnapshotIds(Impl->RunExited))
@@ -441,7 +441,7 @@ void FBSHarnessHookRegistry::EmitRunExited(const FBSHookRunExitContext& Context)
     }
 }
 
-void FBSHarnessHookRegistry::Shutdown()
+void FAgentHookRegistry::Shutdown()
 {
     check(IsInGameThread());
     Impl->Lifetime.Reset();
@@ -450,7 +450,7 @@ void FBSHarnessHookRegistry::Shutdown()
         for (const TSharedPtr<FToolBeforeState, ESPMode::ThreadSafe>& State : Pair.Value)
         {
             State->bFinished = true;
-            State->Complete = FBSHookToolBeforeCompletion();
+            State->Complete = FAgentHookToolBeforeCompletion();
         }
     }
     Impl->PendingBefore.Empty();
@@ -459,7 +459,7 @@ void FBSHarnessHookRegistry::Shutdown()
         for (const TSharedPtr<FToolApprovalState, ESPMode::ThreadSafe>& State : Pair.Value)
         {
             State->bFinished = true;
-            State->Complete = FBSHookToolApprovalCompletion();
+            State->Complete = FAgentHookToolApprovalCompletion();
         }
     }
     Impl->PendingApproval.Empty();

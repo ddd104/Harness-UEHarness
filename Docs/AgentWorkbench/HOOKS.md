@@ -1,6 +1,6 @@
 # Agent Workbench Hook 扩展接口
 
-`BSHarnessHooks` 是 Editor-only 模块，公开注册表位于 `Source/BSHarnessHooks/Public/BSHarnessHookRegistry.h`。`AgentWorkbenchEditor` 负责 Run 状态机、模型请求、工具目标解析和最终派发；扩展模块在启动时向注册表登记处理器，在关闭前用返回的 `FBSHookHandle` 注销。`BSHarnessTools` 的工具注册表继续管理工具名称、Schema 和实际处理函数。Hook 仅作用于 Agent Workbench 的执行路径；直接调用 MCP 分派器的入口不经过这些 Hook。
+Hook 注册表是 `AgentWorkbenchEditor` 模块内的逻辑组件，类型声明位于 `Source/AgentWorkbenchEditor/Private/AgentHookRegistry.h`，实现位于 `Source/AgentWorkbenchEditor/Private/AgentHookRegistry.cpp`。原先独立的 `BSHarnessHooks` 模块已移除，其逻辑等价地迁入本模块，类型改名为 `FAgentHook*` / `EAgentHook*`。`AgentWorkbenchEditor` 负责 Run 状态机、模型请求、工具目标解析和最终派发；处理器在模块启动时向注册表登记，在关闭前用返回的 `FAgentHookHandle` 注销。`BSHarnessTools` 的工具注册表继续管理工具名称、Schema 和实际处理函数。Hook 仅作用于 Agent Workbench 的执行路径；直接调用 MCP 分派器的入口不经过这些 Hook。
 
 ## 触发顺序
 
@@ -12,7 +12,7 @@
 
 ## 注册和并发约定
 
-- 每个 Hook 点内名称唯一；优先级数值较小的先运行，同优先级保持注册顺序。注册和触发发生在 Game Thread。`ToolBefore` 与 `ToolApproval` 的异步 continuation 可从其他线程调用；注册表只接受首次结果，再交回 Game Thread。
+- 每个 Hook 点内名称唯一；优先级数值较小的先运行，同优先级保持注册顺序。注册和触发发生在 Game Thread。`ToolBefore` 与 `ToolApproval` 的异步 continuation 可从其他线程调用；注册表只接受首次结果，再交回 Game Thread。模块卸载时 `FAgentWorkbenchEditorModule::ShutdownModule` 会先结束会话并注销处理器，再调用 `FAgentHookRegistry::Shutdown()` 使挂起回调失效。
 - Hook 上下文带 SessionId、RunId，并在工具阶段带 RequestId、ToolCallId 和本地唯一 InvocationId。扩展的可变状态应按这些 ID 隔离；不要保存可写的 Session、Slate 或 UObject 指针以供后台线程使用。
 - 模块关闭时先阻止新工作并结束正在运行的 Session，再注销处理器。动态热卸载需要额外验证，不应假定持有的异步回调能安全跨模块卸载。
 - 审批模式来自发送时冻结的 Run 快照。Hook 的批准决定不会替代工具桥接层对身份、Schema、路径、取消和超时的最终校验。
