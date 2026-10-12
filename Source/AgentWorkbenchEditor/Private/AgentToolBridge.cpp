@@ -23,6 +23,8 @@ constexpr TCHAR CatalogDescribeId[] = TEXT("ue_mcp.meta.describe.v1");
 constexpr TCHAR CatalogCallId[] = TEXT("ue_mcp.meta.call.v1");
 constexpr TCHAR SubagentTaskName[] = TEXT("bsharness.subagent.task");
 constexpr TCHAR SubagentTaskId[] = TEXT("subagent.task");
+constexpr TCHAR CompactName[] = TEXT("bsharness.compact");
+constexpr TCHAR CompactHandlerId[] = TEXT("compact");
 
 FMCPToolDefinition MakeMetaDefinition(const TCHAR* Name, const TCHAR* HandlerId,
     const TCHAR* Description, const TArray<FString>& StringProperties,
@@ -123,6 +125,18 @@ FMCPToolDefinition MakeSkillDefinition()
     TArray<TSharedPtr<FJsonValue>> Required;
     Required.Add(MakeShared<FJsonValueString>(TEXT("name")));
     Definition.InputSchema->SetArrayField(TEXT("required"), MoveTemp(Required));
+    return Definition;
+}
+
+FMCPToolDefinition MakeCompactDefinition()
+{
+    FMCPToolDefinition Definition;
+    Definition.Name = CompactName;
+    Definition.NativeHandlerId = CompactHandlerId;
+    Definition.Description = TEXT("Summarize earlier conversation to free context space. Call after a completed stage when only the current summary is needed for further work.");
+    Definition.InputSchema = MakeShared<FJsonObject>();
+    Definition.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
+    Definition.InputSchema->SetObjectField(TEXT("properties"), MakeShared<FJsonObject>());
     return Definition;
 }
 
@@ -458,6 +472,11 @@ TArray<FMCPToolDefinition> FAgentToolBridge::ListAvailable(const FAgentRunInputS
         FMCPToolDefinition Skill = MakeSkillDefinition();
         if (IsFrozenBinding(Snapshot, Skill)) { Available.Add(MoveTemp(Skill)); }
     }
+    if (Snapshot.CompactConfig.bEnabled)
+    {
+        FMCPToolDefinition Compact = MakeCompactDefinition();
+        if (IsFrozenBinding(Snapshot, Compact)) { Available.Add(MoveTemp(Compact)); }
+    }
     // UE schemas remain in the frozen local catalog and are fetched through
     // catalog.describe. Keep provider requests stable across model vendors.
     RemoveNameAndAliasConflicts(Available);
@@ -475,6 +494,7 @@ void FAgentToolBridge::FreezeAvailableTools(FAgentRunInputSnapshot& Snapshot)
     All.Append(MetaDefinitions());
     if (Snapshot.bSubagentToolEnabled) { All.Add(MakeSubagentDefinition()); }
     if (FAgentSkillLoader::Get().HasSkills()) { All.Add(MakeSkillDefinition()); }
+    if (Snapshot.CompactConfig.bEnabled) { All.Add(MakeCompactDefinition()); }
     All.Append(FAgentUnrealMCPBridge::ListAvailable());
     RemoveNameAndAliasConflicts(All);
     for (const FMCPToolDefinition& Definition : All)
@@ -584,6 +604,10 @@ bool FAgentToolBridge::RequiresApproval(const FAgentRunInputSnapshot& Snapshot, 
     if (IsSkillLoadName(RegistryName))
     {
         return *FrozenHandler != FAgentSkillLoader::LoadToolHandlerId();
+    }
+    if (IsCompactName(RegistryName))
+    {
+        return *FrozenHandler != CompactHandlerId;
     }
     const TArray<FMCPToolDefinition> Current = FBSHarnessToolsModule::Get().GetToolRegistry().ListTools();
     const FMCPToolDefinition* Native = Current.FindByPredicate([&](const FMCPToolDefinition& Definition)
@@ -709,6 +733,12 @@ void FAgentToolBridge::Execute(const FAgentRunInputSnapshot& Snapshot, const FSt
         Completion(FMCPToolResult::Success(Content));
         return;
     }
+    if (IsCompactName(RegistryName))
+    {
+        Completion(FMCPToolResult::ProtocolError(-32602,
+            TEXT("compact is handled by the harness after the tool batch closes.")));
+        return;
+    }
     FMCPToolRegistry& Registry = FBSHarnessToolsModule::Get().GetToolRegistry();
     const TArray<FMCPToolDefinition> Current = Registry.ListTools();
     const FMCPToolDefinition* Definition = Current.FindByPredicate([&RegistryName](const FMCPToolDefinition& Candidate)
@@ -826,6 +856,11 @@ bool FAgentToolBridge::IsSubagentToolName(const FString& RegistryName)
 bool FAgentToolBridge::IsSkillLoadName(const FString& RegistryName)
 {
     return RegistryName.Equals(FAgentSkillLoader::LoadToolName(), ESearchCase::CaseSensitive);
+}
+
+bool FAgentToolBridge::IsCompactName(const FString& RegistryName)
+{
+    return RegistryName.Equals(CompactName, ESearchCase::CaseSensitive);
 }
 
 #if WITH_DEV_AUTOMATION_TESTS
@@ -1008,6 +1043,34 @@ bool FAgentToolBridgePolicyTest::RunTest(const FString& Parameters)
         }
         return true;
     }));
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAgentToolBridgeCompactTest,
+    "AgentWorkbench.ToolsBridge.CompactTool",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAgentToolBridgeCompactTest::RunTest(const FString& Parameters)
+{
+    TestTrue(TEXT("compact registry name is recognized"),
+        FAgentToolBridge::IsCompactName(TEXT("bsharness.compact")));
+    TestFalse(TEXT("task is not compact"),
+        FAgentToolBridge::IsCompactName(TEXT("bsharness.subagent.task")));
+
+    FAgentRunInputSnapshot Snapshot;
+    Snapshot.bToolListFrozen = true;
+    Snapshot.CompactConfig.bEnabled = true;
+    Snapshot.AllowedToolNames.Add(TEXT("bsharness.compact"));
+    Snapshot.AllowedToolHandlerIds.Add(TEXT("bsharness.compact"), TEXT("compact"));
+
+    const TArray<FMCPToolDefinition> Available = FAgentToolBridge::ListAvailable(Snapshot);
+    TestEqual(TEXT("Frozen compact-only snapshot lists exactly compact"), Available.Num(), 1);
+    TestTrue(TEXT("Listed definition is the compact tool"),
+        Available.Num() == 1 && Available[0].Name == TEXT("bsharness.compact"));
+
+    Snapshot.CompactConfig.bEnabled = false;
+    TestEqual(TEXT("Disabled compaction hides the compact tool"),
+        FAgentToolBridge::ListAvailable(Snapshot).Num(), 0);
     return true;
 }
 

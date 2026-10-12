@@ -1,4 +1,5 @@
 #include "AgentModelClient.h"
+#include "AgentContextCompactor.h"
 #include "AgentWorkbenchJson.h"
 #include "AgentToolBridge.h"
 #include "AgentWorkbenchSession.h"
@@ -672,7 +673,14 @@ bool FAgentModelClient::Start(const TSharedRef<FAgentSession>& Session, const FG
                         FString::Printf(TEXT("模型输出 · HTTP %d"), Status), SafeResponse);
                     Current->Touch();
                 }
-                Current->FailRun(RunId, FString::Printf(TEXT("模型请求失败（HTTP %d）：%s"), Status, *SafeResponse.Left(1000)));
+                if (FAgentContextCompactor::IsContextTooLong(SafeResponse))
+                {
+                    Current->OnModelTooLong(RunId);
+                }
+                else
+                {
+                    Current->FailRun(RunId, FString::Printf(TEXT("模型请求失败（HTTP %d）：%s"), Status, *SafeResponse.Left(1000)));
+                }
                 return;
             }
             FString Reply, ParseError;

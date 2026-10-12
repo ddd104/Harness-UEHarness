@@ -1,5 +1,6 @@
 #include "AgentWorkbenchSession.h"
 #include "AgentAssetContextService.h"
+#include "AgentContextCompactor.h"
 #include "AgentWorkbenchWidgets.h"
 #include "AgentWorkbenchHistory.h"
 #include "AgentWorkbenchSettings.h"
@@ -119,6 +120,7 @@ bool FAgentSession::BeginRun(FString& OutError)
     Snapshot.SubagentMaxTurns = FMath::Max(1, Settings->SubagentMaxTurns);
     Snapshot.SubagentTimeoutSeconds = FMath::Max(1, Settings->SubagentTimeoutSeconds);
     Snapshot.SubagentMaxOutputTokens = FMath::Max(1, Settings->SubagentMaxOutputTokens);
+    Snapshot.CompactConfig = FAgentContextCompactor::ReadConfig();
     FAgentToolBridge::FreezeAvailableTools(Snapshot);
     Snapshot.bToolListFrozen = true;
     Snapshot.SystemPrompt = FAgentSkillLoader::Get().BuildSystemPrompt();
@@ -194,6 +196,9 @@ bool FAgentSession::BeginRun(FString& OutError)
     Runner.PendingToolCalls.Empty();
     Runner.NextToolCallIndex = 0;
     Runner.ToolSteps = 0;
+    Runner.bCompacting = false;
+    Runner.bCompactRequested = false;
+    Runner.ReactiveRetries = 0;
     Runner.CurrentRequestId.Invalidate();
     Runner.CurrentToolCallId.Empty();
     Runner.RunDeadlineSeconds = FPlatformTime::Seconds() + Frozen.RunTimeoutSeconds;
@@ -243,12 +248,7 @@ bool FAgentSession::Send(FString& OutError)
             }
             return false;
         }), static_cast<float>(Runner.LastSnapshot->RunTimeoutSeconds));
-    bool bTimedOut = false;
-    if (!StartModelRequest(AsShared(), OutError, bTimedOut))
-    {
-        FailRun(Runner.CurrentRunId, OutError, bTimedOut);
-        return true;
-    }
+    RequestNextModelTurn(RunId);
     return true;
 }
 
@@ -345,6 +345,10 @@ void FAgentSession::OnModelResponse(const FGuid& RunId, const FGuid& RequestId,
     Runner.Phase = EAgentRunPhase::ProcessingTools;
     Runner.PendingToolCalls = ToolCalls;
     Runner.NextToolCallIndex = 0;
+    Runner.bCompactRequested = ToolCalls.ContainsByPredicate([](const FAgentToolCall& Call)
+    {
+        return FAgentToolBridge::IsCompactName(Call.Name);
+    });
     Touch();
     ExecuteNextTool(RunId);
 }
@@ -359,12 +363,27 @@ void FAgentSession::ExecuteNextTool(const FGuid& RunId)
     if (Runner.NextToolCallIndex >= Runner.PendingToolCalls.Num())
     {
         Runner.PendingToolCalls.Empty();
-        FString Error;
-        bool bTimedOut = false;
-        if (!StartModelRequest(AsShared(), Error, bTimedOut)) { FailRun(RunId, Error, bTimedOut); }
+        if (Runner.bCompactRequested)
+        {
+            Runner.bCompactRequested = false;
+            BeginCompactHistory(RunId);
+            return;
+        }
+        RequestNextModelTurn(RunId);
         return;
     }
     const FAgentToolCall Call = Runner.PendingToolCalls[Runner.NextToolCallIndex];
+    if (FAgentToolBridge::IsCompactName(Call.Name))
+    {
+        // Meta tool: no registry dispatch. Record the request, then synthesize its result
+        // so the closed round is summarized as a whole rather than leaving an orphaned call.
+        Runner.CurrentToolCallId = Call.Id;
+        AddEvent(EAgentEventType::ToolCallStarted, RunId,
+            FString::Printf(TEXT("调用工具：%s"), *Call.Name), Call.ArgumentsJson);
+        Touch();
+        OnToolResult(RunId, Call.Id, Call.Name, TEXT("Compaction requested after this tool batch."));
+        return;
+    }
     Runner.CurrentToolCallId = Call.Id;
     ++Runner.ToolSteps;
     AddEvent(EAgentEventType::ToolCallStarted, RunId,
@@ -388,19 +407,9 @@ void FAgentSession::ExecuteNextTool(const FGuid& RunId)
             if (!Current) { return; }
             FString ResultText;
             FJsonSerializer::Serialize(Result.ToJson(), TJsonWriterFactory<>::Create(&ResultText));
-            // Inline limit for the conversation transcript; the bridge's 1 MiB limit
-            // applies to the raw UE tool payload before it reaches this point.
-            constexpr int32 MaxInlineToolResultChars = 16000;
-            if (ResultText.Len() > MaxInlineToolResultChars)
-            {
-                const int32 OriginalLength = ResultText.Len();
-                TSharedRef<FJsonObject> Truncated = MakeShared<FJsonObject>();
-                Truncated->SetBoolField(TEXT("truncated"), true);
-                Truncated->SetNumberField(TEXT("original_chars"), OriginalLength);
-                Truncated->SetStringField(TEXT("preview"), ResultText.Left(MaxInlineToolResultChars));
-                ResultText.Empty();
-                FJsonSerializer::Serialize(Truncated, TJsonWriterFactory<>::Create(&ResultText));
-            }
+            // Persist oversized results to disk instead of discarding them (s08 Step 1).
+            ResultText = FAgentContextCompactor::FitInlineToolResult(CallId, ResultText,
+                Current->Runner.LastSnapshot->CompactConfig);
             Current->OnToolResult(RunId, CallId, ToolName, ResultText);
         });
 }
@@ -445,6 +454,125 @@ void FAgentSession::CancelRun()
         Touch();
         NotifyRunExited(*this, RunId, EAgentHookRunExitReason::Cancelled);
     }
+}
+
+void FAgentSession::RequestNextModelTurn(const FGuid& RunId)
+{
+    check(IsInGameThread());
+    if (Runner.State != EAgentRunState::Running || Runner.CurrentRunId != RunId) { return; }
+    if (FPlatformTime::Seconds() >= Runner.RunDeadlineSeconds)
+    { FailRun(RunId, TEXT("Run exceeded its total timeout."), true); return; }
+    const FAgentCompactConfig& Config = Runner.LastSnapshot->CompactConfig;
+    if (FAgentContextCompactor::Prepare(Runner.Conversation, Config))
+    {
+        BeginCompactHistory(RunId);
+        return;
+    }
+    FString Error;
+    bool bTimedOut = false;
+    if (!StartModelRequest(AsShared(), Error, bTimedOut)) { FailRun(RunId, Error, bTimedOut); }
+}
+
+void FAgentSession::BeginCompactHistory(const FGuid& RunId)
+{
+    check(IsInGameThread());
+    if (Runner.State != EAgentRunState::Running || Runner.CurrentRunId != RunId) { return; }
+    const FString Transcript = FAgentContextCompactor::WriteTranscript(Runner.Conversation);
+    UE_LOG(LogTemp, Log, TEXT("[auto compact] transcript: %s"), *Transcript);
+    Runner.bCompacting = true;
+    const TSharedPtr<const FAgentRunInputSnapshot> Snapshot = Runner.LastSnapshot;
+    const TArray<FAgentConversationTurn> ToSummarize = Runner.Conversation;
+    const FString ActiveRequest = Snapshot->UserInput;
+    TWeakPtr<FAgentSession> WeakSession = AsShared();
+    FAgentContextCompactor::RequestSummary(*Snapshot, ToSummarize, Snapshot->CompactConfig,
+        Runner.RunDeadlineSeconds, Runner.CancellationToken, Runner.ActiveRequest,
+        [WeakSession, RunId, Transcript, ActiveRequest](bool bOk, const FString& Summary)
+        {
+            if (const TSharedPtr<FAgentSession> Current = WeakSession.Pin())
+            { Current->OnCompactHistorySummary(RunId, bOk, Summary, Transcript, ActiveRequest); }
+        });
+    Touch();
+}
+
+void FAgentSession::OnCompactHistorySummary(const FGuid& RunId, bool bOk, const FString& Summary,
+    const FString& Transcript, const FString& ActiveRequest)
+{
+    check(IsInGameThread());
+    if (Runner.State != EAgentRunState::Running || Runner.CurrentRunId != RunId
+        || !Runner.bCompacting) { return; }
+    Runner.bCompacting = false;
+    Runner.ActiveRequest.Reset();
+    if (FPlatformTime::Seconds() >= Runner.RunDeadlineSeconds)
+    { FailRun(RunId, TEXT("Run exceeded its total timeout."), true); return; }
+    if (!bOk)
+    { FailRun(RunId, TEXT("Context compaction summary failed: ") + Summary); return; }
+    TArray<FAgentConversationTurn> Compacted;
+    Compacted.Add(FAgentContextCompactor::SummaryMessage(
+        TEXT("Compacted"), ActiveRequest, Summary, Transcript));
+    Runner.Conversation = MoveTemp(Compacted);
+    FString Error;
+    bool bTimedOut = false;
+    if (!StartModelRequest(AsShared(), Error, bTimedOut)) { FailRun(RunId, Error, bTimedOut); }
+}
+
+void FAgentSession::BeginReactiveCompact(const FGuid& RunId)
+{
+    check(IsInGameThread());
+    if (Runner.State != EAgentRunState::Running || Runner.CurrentRunId != RunId) { return; }
+    const FAgentCompactConfig& Config = Runner.LastSnapshot->CompactConfig;
+    const int32 TailStart = FAgentContextCompactor::ReactiveTailStart(
+        Runner.Conversation, Config.KeepRecentMessages);
+    TArray<FAgentConversationTurn> OldHistory;
+    for (int32 Index = 0; Index < TailStart; ++Index) { OldHistory.Add(Runner.Conversation[Index]); }
+    const FString Transcript = FAgentContextCompactor::WriteTranscript(Runner.Conversation);
+    Runner.bCompacting = true;
+    const TSharedPtr<const FAgentRunInputSnapshot> Snapshot = Runner.LastSnapshot;
+    const FString ActiveRequest = Snapshot->UserInput;
+    TWeakPtr<FAgentSession> WeakSession = AsShared();
+    FAgentContextCompactor::RequestSummary(*Snapshot, OldHistory, Config,
+        Runner.RunDeadlineSeconds, Runner.CancellationToken, Runner.ActiveRequest,
+        [WeakSession, RunId, TailStart, Transcript, ActiveRequest](bool bOk, const FString& Summary)
+        {
+            if (const TSharedPtr<FAgentSession> Current = WeakSession.Pin())
+            { Current->OnReactiveCompactSummary(RunId, bOk, Summary, TailStart, Transcript, ActiveRequest); }
+        });
+    Touch();
+}
+
+void FAgentSession::OnReactiveCompactSummary(const FGuid& RunId, bool bOk, const FString& Summary,
+    int32 TailStart, const FString& Transcript, const FString& ActiveRequest)
+{
+    check(IsInGameThread());
+    if (Runner.State != EAgentRunState::Running || Runner.CurrentRunId != RunId
+        || !Runner.bCompacting) { return; }
+    Runner.bCompacting = false;
+    Runner.ActiveRequest.Reset();
+    if (FPlatformTime::Seconds() >= Runner.RunDeadlineSeconds)
+    { FailRun(RunId, TEXT("Run exceeded its total timeout."), true); return; }
+    if (!bOk)
+    { FailRun(RunId, TEXT("Reactive compaction summary failed: ") + Summary); return; }
+    Runner.Conversation = FAgentContextCompactor::BuildReactiveConversation(
+        Runner.Conversation, TailStart, ActiveRequest, Summary, Transcript);
+    FString Error;
+    bool bTimedOut = false;
+    if (!StartModelRequest(AsShared(), Error, bTimedOut)) { FailRun(RunId, Error, bTimedOut); }
+}
+
+void FAgentSession::OnModelTooLong(const FGuid& RunId)
+{
+    check(IsInGameThread());
+    if (Runner.State != EAgentRunState::Running || Runner.CurrentRunId != RunId) { return; }
+    Runner.ActiveRequest.Reset();
+    if (FPlatformTime::Seconds() >= Runner.RunDeadlineSeconds)
+    { FailRun(RunId, TEXT("Run exceeded its total timeout."), true); return; }
+    const FAgentCompactConfig& Config = Runner.LastSnapshot->CompactConfig;
+    if (Runner.ReactiveRetries >= Config.MaxReactiveRetries)
+    {
+        FailRun(RunId, TEXT("Model context is still too long after compaction."));
+        return;
+    }
+    ++Runner.ReactiveRetries;
+    BeginReactiveCompact(RunId);
 }
 
 FAgentSessionManager::FAgentSessionManager(const FString& InStorageDirectory)

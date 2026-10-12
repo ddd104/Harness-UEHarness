@@ -46,4 +46,8 @@ public:
 
     // The file-based skill loading tool. Listed only when FAgentSkillLoader has skills.
     static bool IsSkillLoadName(const FString& RegistryName);
+
+    // The Context Compact meta tool. Listed when compaction is enabled; handled by the
+    // harness after the batch closes instead of being dispatched to a registry handler.
+    static bool IsCompactName(const FString& RegistryName);
 };

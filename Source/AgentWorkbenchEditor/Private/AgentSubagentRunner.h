@@ -33,9 +33,16 @@ public:
 private:
     void Begin();
     void StartTurn();
+    void StartTurnCore();
     void OnTurnComplete(FAgentModelTurnResult Result);
     void ExecuteNextTool();
     void OnToolResult(const FString& ToolCallId, const FString& ToolName, FMCPToolResult Result);
+    void BeginCompactHistory();
+    void OnCompactHistorySummary(bool bOk, const FString& Summary,
+        const FString& Transcript, const FString& ActiveRequest);
+    void BeginReactiveCompact();
+    void OnReactiveCompactSummary(bool bOk, const FString& Summary,
+        int32 TailStart, const FString& Transcript, const FString& ActiveRequest);
     void Finish(FMCPToolResult Result);
     bool CheckCancelledOrDeadline(FString& OutError);
 
@@ -54,5 +61,8 @@ private:
     TSharedPtr<IHttpRequest, ESPMode::ThreadSafe> ActiveRequest;
     TSharedPtr<FAgentToolWorkflow> ToolWorkflow;
     FTSTicker::FDelegateHandle DeadlineTickerHandle;
+    FString Prompt;
+    bool bCompacting = false;
+    int32 ReactiveRetries = 0;
     bool bFinished = false;
 };

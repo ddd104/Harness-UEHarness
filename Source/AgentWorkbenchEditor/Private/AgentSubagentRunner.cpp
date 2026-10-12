@@ -1,32 +1,11 @@
 #include "AgentSubagentRunner.h"
+#include "AgentContextCompactor.h"
 #include "AgentToolBridge.h"
 #include "AgentToolWorkflow.h"
 #include "AgentWorkbenchJson.h"
 #include "Containers/Ticker.h"
 #include "HAL/PlatformTime.h"
 #include "Serialization/JsonSerializer.h"
-
-namespace
-{
-constexpr int32 SubagentMaxInlineResultChars = 16000;
-
-FString SerializeToolResult(const FMCPToolResult& Result)
-{
-    FString Text;
-    FJsonSerializer::Serialize(Result.ToJson(), TJsonWriterFactory<>::Create(&Text));
-    if (Text.Len() > SubagentMaxInlineResultChars)
-    {
-        const int32 OriginalLength = Text.Len();
-        TSharedRef<FJsonObject> Truncated = MakeShared<FJsonObject>();
-        Truncated->SetBoolField(TEXT("truncated"), true);
-        Truncated->SetNumberField(TEXT("original_chars"), OriginalLength);
-        Truncated->SetStringField(TEXT("preview"), Text.Left(SubagentMaxInlineResultChars));
-        Text.Empty();
-        FJsonSerializer::Serialize(Truncated, TJsonWriterFactory<>::Create(&Text));
-    }
-    return Text;
-}
-}
 
 void FAgentSubagentRunner::Run(const TSharedRef<const FAgentRunInputSnapshot>& ParentSnapshot,
     const TSharedRef<std::atomic<bool>, ESPMode::ThreadSafe>& CancellationToken,
@@ -47,12 +26,14 @@ void FAgentSubagentRunner::Run(const TSharedRef<const FAgentRunInputSnapshot>& P
     Runner->Completion = MoveTemp(Completion);
     Runner->DeadlineSeconds = Config.DeadlineSeconds;
     Runner->ToolWorkflow = MakeShared<FAgentToolWorkflow>();
+    Runner->Prompt = Prompt;
 
-    // Single-level delegation: the subagent cannot call the task tool.
+    // Single-level delegation: the subagent cannot call the task or compact tool.
     Runner->Tools = FAgentToolBridge::ListAvailable(*Runner->Snapshot);
     Runner->Tools.RemoveAll([](const FMCPToolDefinition& Definition)
     {
-        return FAgentToolBridge::IsSubagentToolName(Definition.Name);
+        return FAgentToolBridge::IsSubagentToolName(Definition.Name)
+            || FAgentToolBridge::IsCompactName(Definition.Name);
     });
 
     FAgentConversationTurn PromptTurn;
@@ -112,6 +93,17 @@ void FAgentSubagentRunner::StartTurn()
         return;
     }
     ++Turns;
+    if (FAgentContextCompactor::Prepare(Conversation, Snapshot->CompactConfig))
+    {
+        BeginCompactHistory();
+        return;
+    }
+    StartTurnCore();
+}
+
+void FAgentSubagentRunner::StartTurnCore()
+{
+    if (bFinished) { return; }
     RequestId = FGuid::NewGuid();
     UE_LOG(LogTemp, Log, TEXT("[Subagent] turn %d/%d"), Turns, Config.MaxTurns);
     const TSharedPtr<FAgentSubagentRunner> Self = AsShared();
@@ -132,8 +124,17 @@ void FAgentSubagentRunner::OnTurnComplete(FAgentModelTurnResult Result)
     if (CheckCancelledOrDeadline(Error)) { Finish(FMCPToolResult::Failure(Error)); return; }
     if (!Result.bTransportSucceeded || !Result.bParsed)
     {
-        Finish(FMCPToolResult::Failure(Result.Error.IsEmpty()
-            ? TEXT("Subagent model request failed.") : Result.Error));
+        const FString Message = Result.Error.IsEmpty()
+            ? TEXT("Subagent model request failed.") : Result.Error;
+        if ((FAgentContextCompactor::IsContextTooLong(Result.Error)
+                || FAgentContextCompactor::IsContextTooLong(Result.ResponseText))
+            && ReactiveRetries < Snapshot->CompactConfig.MaxReactiveRetries)
+        {
+            ++ReactiveRetries;
+            BeginReactiveCompact();
+            return;
+        }
+        Finish(FMCPToolResult::Failure(Message));
         return;
     }
     if (Result.ToolCalls.IsEmpty())
@@ -202,10 +203,81 @@ void FAgentSubagentRunner::OnToolResult(const FString& ToolCallId, const FString
     ToolTurn.Role = EAgentMessageRole::Tool;
     ToolTurn.ToolCallId = ToolCallId;
     ToolTurn.ToolName = ToolName;
-    ToolTurn.Text = SerializeToolResult(Result);
+    FString ResultText;
+    FJsonSerializer::Serialize(Result.ToJson(), TJsonWriterFactory<>::Create(&ResultText));
+    ToolTurn.Text = FAgentContextCompactor::FitInlineToolResult(
+        ToolCallId, ResultText, Snapshot->CompactConfig);
     Conversation.Add(MoveTemp(ToolTurn));
     ++NextToolCallIndex;
     ExecuteNextTool();
+}
+
+void FAgentSubagentRunner::BeginCompactHistory()
+{
+    if (bFinished) { return; }
+    const FString Transcript = FAgentContextCompactor::WriteTranscript(Conversation);
+    UE_LOG(LogTemp, Log, TEXT("[Subagent][auto compact] transcript: %s"), *Transcript);
+    bCompacting = true;
+    const TArray<FAgentConversationTurn> ToSummarize = Conversation;
+    const FString ActivePrompt = Prompt;
+    const TSharedPtr<FAgentSubagentRunner> Self = AsShared();
+    FAgentContextCompactor::RequestSummary(*Snapshot, ToSummarize, Snapshot->CompactConfig,
+        DeadlineSeconds, CancellationToken, ActiveRequest,
+        [Weak = TWeakPtr<FAgentSubagentRunner>(Self), Transcript, ActivePrompt](bool bOk, const FString& Summary)
+        {
+            if (const TSharedPtr<FAgentSubagentRunner> Strong = Weak.Pin())
+            { Strong->OnCompactHistorySummary(bOk, Summary, Transcript, ActivePrompt); }
+        });
+}
+
+void FAgentSubagentRunner::OnCompactHistorySummary(bool bOk, const FString& Summary,
+    const FString& Transcript, const FString& ActivePrompt)
+{
+    if (bFinished || !bCompacting) { return; }
+    bCompacting = false;
+    ActiveRequest.Reset();
+    FString Error;
+    if (CheckCancelledOrDeadline(Error)) { Finish(FMCPToolResult::Failure(Error)); return; }
+    if (!bOk) { Finish(FMCPToolResult::Failure(TEXT("Subagent context compaction failed: ") + Summary)); return; }
+    TArray<FAgentConversationTurn> Compacted;
+    Compacted.Add(FAgentContextCompactor::SummaryMessage(
+        TEXT("Compacted"), ActivePrompt, Summary, Transcript));
+    Conversation = MoveTemp(Compacted);
+    StartTurnCore();
+}
+
+void FAgentSubagentRunner::BeginReactiveCompact()
+{
+    if (bFinished) { return; }
+    const int32 TailStart = FAgentContextCompactor::ReactiveTailStart(
+        Conversation, Snapshot->CompactConfig.KeepRecentMessages);
+    TArray<FAgentConversationTurn> OldHistory;
+    for (int32 Index = 0; Index < TailStart; ++Index) { OldHistory.Add(Conversation[Index]); }
+    const FString Transcript = FAgentContextCompactor::WriteTranscript(Conversation);
+    bCompacting = true;
+    const FString ActivePrompt = Prompt;
+    const TSharedPtr<FAgentSubagentRunner> Self = AsShared();
+    FAgentContextCompactor::RequestSummary(*Snapshot, OldHistory, Snapshot->CompactConfig,
+        DeadlineSeconds, CancellationToken, ActiveRequest,
+        [Weak = TWeakPtr<FAgentSubagentRunner>(Self), TailStart, Transcript, ActivePrompt](bool bOk, const FString& Summary)
+        {
+            if (const TSharedPtr<FAgentSubagentRunner> Strong = Weak.Pin())
+            { Strong->OnReactiveCompactSummary(bOk, Summary, TailStart, Transcript, ActivePrompt); }
+        });
+}
+
+void FAgentSubagentRunner::OnReactiveCompactSummary(bool bOk, const FString& Summary,
+    int32 TailStart, const FString& Transcript, const FString& ActivePrompt)
+{
+    if (bFinished || !bCompacting) { return; }
+    bCompacting = false;
+    ActiveRequest.Reset();
+    FString Error;
+    if (CheckCancelledOrDeadline(Error)) { Finish(FMCPToolResult::Failure(Error)); return; }
+    if (!bOk) { Finish(FMCPToolResult::Failure(TEXT("Subagent reactive compaction failed: ") + Summary)); return; }
+    Conversation = FAgentContextCompactor::BuildReactiveConversation(
+        Conversation, TailStart, ActivePrompt, Summary, Transcript);
+    StartTurnCore();
 }
 
 void FAgentSubagentRunner::Finish(FMCPToolResult Result)

@@ -55,6 +55,16 @@ public:
     UPROPERTY(Config, EditAnywhere, Category="Subagent", meta=(ClampMin="1")) int32 SubagentMaxTurns;
     UPROPERTY(Config, EditAnywhere, Category="Subagent", meta=(ClampMin="1")) int32 SubagentTimeoutSeconds;
     UPROPERTY(Config, EditAnywhere, Category="Subagent", meta=(ClampMin="1")) int32 SubagentMaxOutputTokens;
+    // Context Compact (s08): character-count thresholds for the pre-request pipeline.
+    UPROPERTY(Config, EditAnywhere, Category="Context Compact") bool bEnableContextCompact;
+    UPROPERTY(Config, EditAnywhere, Category="Context Compact", meta=(ClampMin="1000")) int32 ContextCharLimit;
+    UPROPERTY(Config, EditAnywhere, Category="Context Compact", meta=(ClampMin="1000")) int32 ToolResultBudgetChars;
+    UPROPERTY(Config, EditAnywhere, Category="Context Compact", meta=(ClampMin="1000")) int32 LargeResultCharLimit;
+    UPROPERTY(Config, EditAnywhere, Category="Context Compact", meta=(ClampMin="4")) int32 SnipMaxMessages;
+    UPROPERTY(Config, EditAnywhere, Category="Context Compact", meta=(ClampMin="0")) int32 KeepRecentResults;
+    UPROPERTY(Config, EditAnywhere, Category="Context Compact", meta=(ClampMin="0")) int32 KeepRecentMessages;
+    UPROPERTY(Config, EditAnywhere, Category="Context Compact", meta=(ClampMin="0", ClampMax="3")) int32 MaxReactiveRetries;
+    UPROPERTY(Config, EditAnywhere, Category="Context Compact", meta=(ClampMin="512")) int32 SummaryMaxOutputTokens;
     // Filesystem directories of file-based skills. Each entry is a directory whose
     // immediate subdirectories contain a SKILL.md; use the folder picker to add one.
     // Entries are stored relative to the project root (absolute when outside it) and

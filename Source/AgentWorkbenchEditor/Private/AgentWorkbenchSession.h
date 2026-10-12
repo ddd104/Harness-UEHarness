@@ -64,6 +64,20 @@ struct FAgentModelOptions
     int32 MaxOutputTokens = 2048;
 };
 
+/** Context Compact (s08) thresholds, frozen at Run start like the other limits. */
+struct FAgentCompactConfig
+{
+    bool bEnabled = true;
+    int32 ContextCharLimit = 50000;
+    int32 ToolResultBudgetChars = 200000;
+    int32 LargeResultCharLimit = 30000;
+    int32 SnipMaxMessages = 50;
+    int32 KeepRecentResults = 3;
+    int32 KeepRecentMessages = 5;
+    int32 MaxReactiveRetries = 1;
+    int32 SummaryMaxOutputTokens = 4096;
+};
+
 struct FAgentConversationTurn
 {
     EAgentMessageRole Role = EAgentMessageRole::User;
@@ -99,6 +113,8 @@ struct FAgentRunInputSnapshot
     int32 SubagentMaxOutputTokens = 8000;
     // Skill catalog system prompt, frozen at Run start. Empty when no skills exist.
     FString SystemPrompt;
+    // Context Compact thresholds, frozen at Run start. Derived from project settings.
+    FAgentCompactConfig CompactConfig;
     FDateTime CreatedAt = FDateTime::UtcNow();
 };
 
@@ -119,6 +135,11 @@ public:
     int32 NextToolCallIndex = 0;
     int32 ToolSteps = 0;
     double RunDeadlineSeconds = 0.0;
+    // Context Compact: true while a summary request (Step 4 or reactive) is in flight.
+    bool bCompacting = false;
+    // True when the model requested the compact tool in the current batch.
+    bool bCompactRequested = false;
+    int32 ReactiveRetries = 0;
     FTSTicker::FDelegateHandle RunTimeoutHandle;
     void Cancel();
 };
@@ -159,6 +180,16 @@ public:
     void OnToolResult(const FGuid& RunId, const FString& ToolCallId, const FString& ToolName,
         const FString& ResultText);
     void CancelRun();
+
+    // Context Compact: prepare + (optionally) summarize + start the next model request.
+    void RequestNextModelTurn(const FGuid& RunId);
+    void BeginCompactHistory(const FGuid& RunId);
+    void OnCompactHistorySummary(const FGuid& RunId, bool bOk, const FString& Summary,
+        const FString& Transcript, const FString& ActiveRequest);
+    void BeginReactiveCompact(const FGuid& RunId);
+    void OnReactiveCompactSummary(const FGuid& RunId, bool bOk, const FString& Summary,
+        int32 TailStart, const FString& Transcript, const FString& ActiveRequest);
+    void OnModelTooLong(const FGuid& RunId);
 };
 
 class FAgentSessionManager : public TSharedFromThis<FAgentSessionManager>
