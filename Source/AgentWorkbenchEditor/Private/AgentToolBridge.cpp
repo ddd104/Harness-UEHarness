@@ -4,6 +4,7 @@
 #include "AgentUnrealMCPBridge.h"
 #include "AgentWorkbenchSession.h"
 #include "AgentSkillLoader.h"
+#include "AgentMemoryStore.h"
 #include "Async/Async.h"
 #include "BSHarnessToolsModule.h"
 #include "Engine/Blueprint.h"
@@ -137,6 +138,55 @@ FMCPToolDefinition MakeCompactDefinition()
     Definition.InputSchema = MakeShared<FJsonObject>();
     Definition.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
     Definition.InputSchema->SetObjectField(TEXT("properties"), MakeShared<FJsonObject>());
+    return Definition;
+}
+
+FMCPToolDefinition MakeMemoryRememberDefinition()
+{
+    FMCPToolDefinition Definition;
+    Definition.Name = FAgentMemoryStore::RememberToolName();
+    Definition.NativeHandlerId = FAgentMemoryStore::RememberToolHandlerId();
+    Definition.Description = TEXT("Persist reusable cross-session knowledge into the project memory store (a Markdown file under the project's Memory directory). Provide a short name, a type (user|feedback|project|reference), a one-line description and the full fact to remember.");
+    Definition.InputSchema = MakeShared<FJsonObject>();
+    Definition.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
+    const TSharedRef<FJsonObject> Properties = MakeShared<FJsonObject>();
+    auto AddString = [&Properties](const TCHAR* Name, const TCHAR* Description)
+    {
+        const TSharedRef<FJsonObject> Rule = MakeShared<FJsonObject>();
+        Rule->SetStringField(TEXT("type"), TEXT("string"));
+        Rule->SetStringField(TEXT("description"), Description);
+        Properties->SetObjectField(Name, Rule);
+    };
+    AddString(TEXT("name"), TEXT("Short unique key for the memory, e.g. user-preference-tabs."));
+    AddString(TEXT("type"), TEXT("One of user, feedback, project or reference."));
+    AddString(TEXT("description"), TEXT("One-line summary shown in the memory index."));
+    AddString(TEXT("body"), TEXT("The full fact to remember across sessions."));
+    Definition.InputSchema->SetObjectField(TEXT("properties"), Properties);
+    TArray<TSharedPtr<FJsonValue>> Required;
+    Required.Add(MakeShared<FJsonValueString>(TEXT("name")));
+    Required.Add(MakeShared<FJsonValueString>(TEXT("description")));
+    Required.Add(MakeShared<FJsonValueString>(TEXT("body")));
+    Definition.InputSchema->SetArrayField(TEXT("required"), MoveTemp(Required));
+    return Definition;
+}
+
+FMCPToolDefinition MakeMemoryForgetDefinition()
+{
+    FMCPToolDefinition Definition;
+    Definition.Name = FAgentMemoryStore::ForgetToolName();
+    Definition.NativeHandlerId = FAgentMemoryStore::ForgetToolHandlerId();
+    Definition.Description = TEXT("Delete a stored memory by its name from the project memory store. Only affects the memory file, not any real asset.");
+    Definition.InputSchema = MakeShared<FJsonObject>();
+    Definition.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
+    const TSharedRef<FJsonObject> Properties = MakeShared<FJsonObject>();
+    const TSharedRef<FJsonObject> NameRule = MakeShared<FJsonObject>();
+    NameRule->SetStringField(TEXT("type"), TEXT("string"));
+    NameRule->SetStringField(TEXT("description"), TEXT("The memory name to delete."));
+    Properties->SetObjectField(TEXT("name"), NameRule);
+    Definition.InputSchema->SetObjectField(TEXT("properties"), Properties);
+    TArray<TSharedPtr<FJsonValue>> Required;
+    Required.Add(MakeShared<FJsonValueString>(TEXT("name")));
+    Definition.InputSchema->SetArrayField(TEXT("required"), MoveTemp(Required));
     return Definition;
 }
 
@@ -477,6 +527,13 @@ TArray<FMCPToolDefinition> FAgentToolBridge::ListAvailable(const FAgentRunInputS
         FMCPToolDefinition Compact = MakeCompactDefinition();
         if (IsFrozenBinding(Snapshot, Compact)) { Available.Add(MoveTemp(Compact)); }
     }
+    if (Snapshot.MemoryConfig.bEnabled)
+    {
+        FMCPToolDefinition Remember = MakeMemoryRememberDefinition();
+        if (IsFrozenBinding(Snapshot, Remember)) { Available.Add(MoveTemp(Remember)); }
+        FMCPToolDefinition Forget = MakeMemoryForgetDefinition();
+        if (IsFrozenBinding(Snapshot, Forget)) { Available.Add(MoveTemp(Forget)); }
+    }
     // UE schemas remain in the frozen local catalog and are fetched through
     // catalog.describe. Keep provider requests stable across model vendors.
     RemoveNameAndAliasConflicts(Available);
@@ -495,6 +552,11 @@ void FAgentToolBridge::FreezeAvailableTools(FAgentRunInputSnapshot& Snapshot)
     if (Snapshot.bSubagentToolEnabled) { All.Add(MakeSubagentDefinition()); }
     if (FAgentSkillLoader::Get().HasSkills()) { All.Add(MakeSkillDefinition()); }
     if (Snapshot.CompactConfig.bEnabled) { All.Add(MakeCompactDefinition()); }
+    if (Snapshot.MemoryConfig.bEnabled)
+    {
+        All.Add(MakeMemoryRememberDefinition());
+        All.Add(MakeMemoryForgetDefinition());
+    }
     All.Append(FAgentUnrealMCPBridge::ListAvailable());
     RemoveNameAndAliasConflicts(All);
     for (const FMCPToolDefinition& Definition : All)
@@ -608,6 +670,11 @@ bool FAgentToolBridge::RequiresApproval(const FAgentRunInputSnapshot& Snapshot, 
     if (IsCompactName(RegistryName))
     {
         return *FrozenHandler != CompactHandlerId;
+    }
+    if (IsMemoryRememberName(RegistryName) || IsMemoryForgetName(RegistryName))
+    {
+        // Memory mutation (write/delete a project file) requires explicit approval.
+        return true;
     }
     const TArray<FMCPToolDefinition> Current = FBSHarnessToolsModule::Get().GetToolRegistry().ListTools();
     const FMCPToolDefinition* Native = Current.FindByPredicate([&](const FMCPToolDefinition& Definition)
@@ -739,6 +806,64 @@ void FAgentToolBridge::Execute(const FAgentRunInputSnapshot& Snapshot, const FSt
             TEXT("compact is handled by the harness after the tool batch closes.")));
         return;
     }
+    if (IsMemoryRememberName(RegistryName))
+    {
+        if (*FrozenHandler != FAgentMemoryStore::RememberToolHandlerId())
+        {
+            Completion(FMCPToolResult::ProtocolError(-32602, TEXT("Memory tool identity changed since this run started.")));
+            return;
+        }
+        if (!bApproved)
+        {
+            Completion(FMCPToolResult::ProtocolError(-32602, TEXT("Remembering requires explicit user approval.")));
+            return;
+        }
+        FString Name, Type, Description, Body;
+        if (!Arguments->TryGetStringField(TEXT("name"), Name)
+            || !Arguments->TryGetStringField(TEXT("description"), Description)
+            || !Arguments->TryGetStringField(TEXT("body"), Body))
+        {
+            Completion(FMCPToolResult::ProtocolError(-32602, TEXT("name, description and body are required.")));
+            return;
+        }
+        Arguments->TryGetStringField(TEXT("type"), Type);
+        if (Type.IsEmpty()) { Type = TEXT("user"); }
+        FString Error;
+        if (!FAgentMemoryStore::Get().WriteMemory(Name, Type, Description, Body, Error))
+        {
+            Completion(FMCPToolResult::Failure(Error));
+            return;
+        }
+        Completion(FMCPToolResult::Success(FString::Printf(TEXT("Remembered '%s'."), *Name.TrimStartAndEnd())));
+        return;
+    }
+    if (IsMemoryForgetName(RegistryName))
+    {
+        if (*FrozenHandler != FAgentMemoryStore::ForgetToolHandlerId())
+        {
+            Completion(FMCPToolResult::ProtocolError(-32602, TEXT("Memory tool identity changed since this run started.")));
+            return;
+        }
+        if (!bApproved)
+        {
+            Completion(FMCPToolResult::ProtocolError(-32602, TEXT("Forgetting requires explicit user approval.")));
+            return;
+        }
+        FString Name;
+        if (!Arguments->TryGetStringField(TEXT("name"), Name) || Name.TrimStartAndEnd().IsEmpty())
+        {
+            Completion(FMCPToolResult::ProtocolError(-32602, TEXT("name must be a non-empty string.")));
+            return;
+        }
+        FString Error;
+        if (!FAgentMemoryStore::Get().ForgetMemory(Name, Error))
+        {
+            Completion(FMCPToolResult::Failure(Error));
+            return;
+        }
+        Completion(FMCPToolResult::Success(FString::Printf(TEXT("Forgot '%s'."), *Name.TrimStartAndEnd())));
+        return;
+    }
     FMCPToolRegistry& Registry = FBSHarnessToolsModule::Get().GetToolRegistry();
     const TArray<FMCPToolDefinition> Current = Registry.ListTools();
     const FMCPToolDefinition* Definition = Current.FindByPredicate([&RegistryName](const FMCPToolDefinition& Candidate)
@@ -861,6 +986,16 @@ bool FAgentToolBridge::IsSkillLoadName(const FString& RegistryName)
 bool FAgentToolBridge::IsCompactName(const FString& RegistryName)
 {
     return RegistryName.Equals(CompactName, ESearchCase::CaseSensitive);
+}
+
+bool FAgentToolBridge::IsMemoryRememberName(const FString& RegistryName)
+{
+    return RegistryName.Equals(FAgentMemoryStore::RememberToolName(), ESearchCase::CaseSensitive);
+}
+
+bool FAgentToolBridge::IsMemoryForgetName(const FString& RegistryName)
+{
+    return RegistryName.Equals(FAgentMemoryStore::ForgetToolName(), ESearchCase::CaseSensitive);
 }
 
 #if WITH_DEV_AUTOMATION_TESTS
@@ -1071,6 +1206,44 @@ bool FAgentToolBridgeCompactTest::RunTest(const FString& Parameters)
     Snapshot.CompactConfig.bEnabled = false;
     TestEqual(TEXT("Disabled compaction hides the compact tool"),
         FAgentToolBridge::ListAvailable(Snapshot).Num(), 0);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAgentToolBridgeMemoryTest,
+    "AgentWorkbench.ToolsBridge.MemoryTools",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAgentToolBridgeMemoryTest::RunTest(const FString& Parameters)
+{
+    TestTrue(TEXT("remember registry name is recognized"),
+        FAgentToolBridge::IsMemoryRememberName(TEXT("bsharness.memory.remember")));
+    TestTrue(TEXT("forget registry name is recognized"),
+        FAgentToolBridge::IsMemoryForgetName(TEXT("bsharness.memory.forget")));
+    TestFalse(TEXT("compact is not a memory tool"),
+        FAgentToolBridge::IsMemoryRememberName(TEXT("bsharness.compact")));
+
+    FAgentRunInputSnapshot Snapshot;
+    Snapshot.bToolListFrozen = true;
+    Snapshot.MemoryConfig.bEnabled = true;
+    Snapshot.AllowedToolNames.Add(TEXT("bsharness.memory.remember"));
+    Snapshot.AllowedToolHandlerIds.Add(TEXT("bsharness.memory.remember"), TEXT("memory.remember"));
+    Snapshot.AllowedToolNames.Add(TEXT("bsharness.memory.forget"));
+    Snapshot.AllowedToolHandlerIds.Add(TEXT("bsharness.memory.forget"), TEXT("memory.forget"));
+
+    const TArray<FMCPToolDefinition> Available = FAgentToolBridge::ListAvailable(Snapshot);
+    TestEqual(TEXT("Frozen memory-only snapshot lists exactly two tools"), Available.Num(), 2);
+
+    Snapshot.MemoryConfig.bEnabled = false;
+    TestEqual(TEXT("Disabled memory hides both memory tools"),
+        FAgentToolBridge::ListAvailable(Snapshot).Num(), 0);
+
+    // Remember/forget are mutations and always require approval.
+    FAgentRunInputSnapshot ApprovalSnapshot;
+    ApprovalSnapshot.bToolListFrozen = true;
+    ApprovalSnapshot.AllowedToolNames.Add(TEXT("bsharness.memory.remember"));
+    ApprovalSnapshot.AllowedToolHandlerIds.Add(TEXT("bsharness.memory.remember"), TEXT("memory.remember"));
+    TestTrue(TEXT("remember requires approval"),
+        FAgentToolBridge::RequiresApproval(ApprovalSnapshot, TEXT("bsharness.memory.remember")));
     return true;
 }
 

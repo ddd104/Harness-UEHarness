@@ -73,5 +73,14 @@ public:
     UPROPERTY(Config, EditAnywhere, Category="Skills",
         meta=(DisplayName="Skill Directories", TitleProperty="Path"))
     TArray<FAgentSkillDirectory> SkillDirectories;
+    // Memory (s09): cross-session reusable knowledge stored under <Project>/Memory/.
+    UPROPERTY(Config, EditAnywhere, Category="Memory") bool bEnableMemory;
+    UPROPERTY(Config, EditAnywhere, Category="Memory") bool bUseMemoryModel;
+    UPROPERTY(Config, EditAnywhere, Category="Memory") EAgentWorkbenchProvider MemoryProvider;
+    UPROPERTY(Config, EditAnywhere, Category="Memory") FString MemoryModel;
+    UPROPERTY(Config, EditAnywhere, Category="Memory", meta=(ClampMin="1", ClampMax="20")) int32 MaxRecallCount;
+    UPROPERTY(Config, EditAnywhere, Category="Memory", meta=(ClampMin="256")) int32 MaxRecallBodyChars;
+    UPROPERTY(Config, EditAnywhere, Category="Memory", meta=(ClampMin="2")) int32 ConsolidateThreshold;
+    UPROPERTY(Config, EditAnywhere, Category="Memory", meta=(ClampMin="256")) int32 MemoryMaxOutputTokens;
     UPROPERTY(Config, EditAnywhere, Category="Privacy") bool bPersistDetailedPayloads;
 };

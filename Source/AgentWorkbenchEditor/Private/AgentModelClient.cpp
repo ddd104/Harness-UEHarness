@@ -614,7 +614,17 @@ bool FAgentModelClient::Start(const TSharedRef<FAgentSession>& Session, const FG
         Aliases.Add(Alias, Tool.Name);
     }
     TSharedPtr<FJsonObject> Body;
-    if (!BuildBody(Provider, Snapshot, Session->Runner.Conversation, Tools, Body, OutError)) { return false; }
+    // Memory (s09): prepend the recalled memory context to the frozen system prompt as
+    // background knowledge. The frozen snapshot stays immutable; only this request sees it.
+    FAgentRunInputSnapshot EffectiveSnapshot = Snapshot;
+    const FString& RecalledMemory = Session->Runner.RecalledMemoryContext;
+    if (!RecalledMemory.IsEmpty())
+    {
+        EffectiveSnapshot.SystemPrompt = Snapshot.SystemPrompt.IsEmpty()
+            ? RecalledMemory
+            : Snapshot.SystemPrompt + TEXT("\n\n") + RecalledMemory;
+    }
+    if (!BuildBody(Provider, EffectiveSnapshot, Session->Runner.Conversation, Tools, Body, OutError)) { return false; }
     const double RemainingSeconds = Session->Runner.RunDeadlineSeconds - FPlatformTime::Seconds();
     if (RemainingSeconds <= 0.0)
     {

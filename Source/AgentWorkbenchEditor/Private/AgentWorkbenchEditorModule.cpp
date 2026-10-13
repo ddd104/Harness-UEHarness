@@ -1,6 +1,7 @@
 #include "AgentHookRegistry.h"
 #include "AgentSkillDirectoryCustomization.h"
 #include "AgentSkillLoader.h"
+#include "AgentMemoryStore.h"
 #include "AgentWorkbenchSession.h"
 #include "AgentWorkbenchSettings.h"
 #include "AgentToolWorkflow.h"
@@ -48,6 +49,7 @@ public:
         // Invalidate pending asynchronous hook continuations before the module unloads.
         if (IsInGameThread()) { FAgentHookRegistry::Get().Shutdown(); }
         FAgentSkillLoader::Get().Shutdown();
+        FAgentMemoryStore::Get().Shutdown();
     }
 
 private:

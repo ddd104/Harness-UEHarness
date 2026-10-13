@@ -9,6 +9,7 @@
 #include "AgentToolWorkflow.h"
 #include "AgentHookRegistry.h"
 #include "AgentSkillLoader.h"
+#include "AgentMemoryStore.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Containers/Ticker.h"
 #include "HAL/FileManager.h"
@@ -86,6 +87,7 @@ void FAgentRunner::Cancel()
     CurrentRequestId.Invalidate();
     CurrentToolCallId.Empty();
     PendingToolCalls.Empty();
+    bRecalling = false;
     ClearRunTimeout(*this);
     if (ActiveRequest) { ActiveRequest->CancelRequest(); ActiveRequest.Reset(); }
 }
@@ -121,6 +123,7 @@ bool FAgentSession::BeginRun(FString& OutError)
     Snapshot.SubagentTimeoutSeconds = FMath::Max(1, Settings->SubagentTimeoutSeconds);
     Snapshot.SubagentMaxOutputTokens = FMath::Max(1, Settings->SubagentMaxOutputTokens);
     Snapshot.CompactConfig = FAgentContextCompactor::ReadConfig();
+    Snapshot.MemoryConfig = FAgentMemoryStore::ReadConfig();
     FAgentToolBridge::FreezeAvailableTools(Snapshot);
     Snapshot.bToolListFrozen = true;
     Snapshot.SystemPrompt = FAgentSkillLoader::Get().BuildSystemPrompt();
@@ -203,6 +206,8 @@ bool FAgentSession::BeginRun(FString& OutError)
     Runner.CurrentToolCallId.Empty();
     Runner.RunDeadlineSeconds = FPlatformTime::Seconds() + Frozen.RunTimeoutSeconds;
     Runner.CancellationToken = MakeShared<std::atomic<bool>, ESPMode::ThreadSafe>(false);
+    Runner.RecalledMemoryContext.Empty();
+    Runner.bRecalling = false;
     if (!Runner.ToolWorkflow) { Runner.ToolWorkflow = MakeShared<FAgentToolWorkflow>(); }
     FAgentRunInputSnapshot Historical = Frozen;
     Historical.AllowedToolNames.Reset();
@@ -248,7 +253,7 @@ bool FAgentSession::Send(FString& OutError)
             }
             return false;
         }), static_cast<float>(Runner.LastSnapshot->RunTimeoutSeconds));
-    RequestNextModelTurn(RunId);
+    BeginRecall(RunId);
     return true;
 }
 
@@ -270,6 +275,18 @@ void FAgentSession::CompleteRun(const FGuid& RunId, const FString& ReplyText)
     AddEvent(EAgentEventType::RunCompleted, RunId, TEXT("任务完成"));
     Touch();
     NotifyRunExited(*this, RunId, EAgentHookRunExitReason::Completed);
+    // s09: after a natural completion, extract reusable cross-session knowledge. This is a
+    // fire-and-forget background call; the run is already finished and no further model turn
+    // depends on it.
+    if (Runner.LastSnapshot.IsValid() && Runner.LastSnapshot->MemoryConfig.bEnabled)
+    {
+        FAgentMemoryStore::Get().ExtractAsync(*Runner.LastSnapshot, Runner.Conversation, ReplyText,
+            Runner.LastSnapshot->MemoryConfig,
+            [](int32 WrittenCount)
+            {
+                UE_LOG(LogTemp, Log, TEXT("[memory] extracted %d reusable record(s)."), WrittenCount);
+            });
+    }
 }
 
 void FAgentSession::FailRun(const FGuid& RunId, const FString& Error, bool bTimedOut)
@@ -454,6 +471,41 @@ void FAgentSession::CancelRun()
         Touch();
         NotifyRunExited(*this, RunId, EAgentHookRunExitReason::Cancelled);
     }
+}
+
+void FAgentSession::BeginRecall(const FGuid& RunId)
+{
+    check(IsInGameThread());
+    if (Runner.State != EAgentRunState::Running || Runner.CurrentRunId != RunId) { return; }
+    const FAgentMemoryConfig& Config = Runner.LastSnapshot->MemoryConfig;
+    Runner.RecalledMemoryContext.Empty();
+    if (!Config.bEnabled || !FAgentMemoryStore::Get().HasMemories())
+    {
+        RequestNextModelTurn(RunId);
+        return;
+    }
+    Runner.bRecalling = true;
+    TWeakPtr<FAgentSession> WeakSession = AsShared();
+    FAgentMemoryStore::Get().SelectRelevantAsync(*Runner.LastSnapshot, Runner.LastSnapshot->UserInput,
+        Config, Runner.RunDeadlineSeconds, Runner.CancellationToken, Runner.ActiveRequest,
+        [WeakSession, RunId](const FString& Context)
+        {
+            if (const TSharedPtr<FAgentSession> Current = WeakSession.Pin())
+            { Current->OnRecallComplete(RunId, Context); }
+        });
+}
+
+void FAgentSession::OnRecallComplete(const FGuid& RunId, const FString& Context)
+{
+    check(IsInGameThread());
+    if (Runner.State != EAgentRunState::Running || Runner.CurrentRunId != RunId
+        || !Runner.bRecalling) { return; }
+    Runner.bRecalling = false;
+    Runner.ActiveRequest.Reset();
+    if (FPlatformTime::Seconds() >= Runner.RunDeadlineSeconds)
+    { FailRun(RunId, TEXT("Run exceeded its total timeout."), true); return; }
+    Runner.RecalledMemoryContext = Context;
+    RequestNextModelTurn(RunId);
 }
 
 void FAgentSession::RequestNextModelTurn(const FGuid& RunId)

@@ -78,6 +78,21 @@ struct FAgentCompactConfig
     int32 SummaryMaxOutputTokens = 4096;
 };
 
+/** Memory (s09) thresholds, frozen at Run start like the other limits. */
+struct FAgentMemoryConfig
+{
+    bool bEnabled = true;
+    // When true, background memory calls use MemoryProvider/MemoryModel instead of the
+    // run's provider/model (an independent lightweight model for selection/extract/consolidate).
+    bool bUseMemoryModel = false;
+    EAgentWorkbenchProvider MemoryProvider = EAgentWorkbenchProvider::DeepSeek;
+    FString MemoryModel;  // Empty with bUseMemoryModel falls back to the run's model.
+    int32 MaxRecallCount = 5;
+    int32 MaxRecallBodyChars = 4000;
+    int32 ConsolidateThreshold = 10;
+    int32 MemoryMaxOutputTokens = 2048;
+};
+
 struct FAgentConversationTurn
 {
     EAgentMessageRole Role = EAgentMessageRole::User;
@@ -115,6 +130,8 @@ struct FAgentRunInputSnapshot
     FString SystemPrompt;
     // Context Compact thresholds, frozen at Run start. Derived from project settings.
     FAgentCompactConfig CompactConfig;
+    // Memory thresholds, frozen at Run start. Derived from project settings.
+    FAgentMemoryConfig MemoryConfig;
     FDateTime CreatedAt = FDateTime::UtcNow();
 };
 
@@ -140,6 +157,10 @@ public:
     // True when the model requested the compact tool in the current batch.
     bool bCompactRequested = false;
     int32 ReactiveRetries = 0;
+    // Memory (s09): recalled memory context injected into the model's system prompt for
+    // this run, and the flag guarding the async recall selection step.
+    FString RecalledMemoryContext;
+    bool bRecalling = false;
     FTSTicker::FDelegateHandle RunTimeoutHandle;
     void Cancel();
 };
@@ -183,6 +204,10 @@ public:
 
     // Context Compact: prepare + (optionally) summarize + start the next model request.
     void RequestNextModelTurn(const FGuid& RunId);
+    // Memory (s09): recall relevant memories (async selection with keyword fallback) before
+    // the first model request of a run.
+    void BeginRecall(const FGuid& RunId);
+    void OnRecallComplete(const FGuid& RunId, const FString& Context);
     void BeginCompactHistory(const FGuid& RunId);
     void OnCompactHistorySummary(const FGuid& RunId, bool bOk, const FString& Summary,
         const FString& Transcript, const FString& ActiveRequest);

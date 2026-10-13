@@ -28,12 +28,14 @@ void FAgentSubagentRunner::Run(const TSharedRef<const FAgentRunInputSnapshot>& P
     Runner->ToolWorkflow = MakeShared<FAgentToolWorkflow>();
     Runner->Prompt = Prompt;
 
-    // Single-level delegation: the subagent cannot call the task or compact tool.
+    // Single-level delegation: the subagent cannot call the task, compact or memory tools.
     Runner->Tools = FAgentToolBridge::ListAvailable(*Runner->Snapshot);
     Runner->Tools.RemoveAll([](const FMCPToolDefinition& Definition)
     {
         return FAgentToolBridge::IsSubagentToolName(Definition.Name)
-            || FAgentToolBridge::IsCompactName(Definition.Name);
+            || FAgentToolBridge::IsCompactName(Definition.Name)
+            || FAgentToolBridge::IsMemoryRememberName(Definition.Name)
+            || FAgentToolBridge::IsMemoryForgetName(Definition.Name);
     });
 
     FAgentConversationTurn PromptTurn;

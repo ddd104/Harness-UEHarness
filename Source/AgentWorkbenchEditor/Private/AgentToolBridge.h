@@ -50,4 +50,9 @@ public:
     // The Context Compact meta tool. Listed when compaction is enabled; handled by the
     // harness after the batch closes instead of being dispatched to a registry handler.
     static bool IsCompactName(const FString& RegistryName);
+
+    // The Memory meta tools (remember/forget). Listed when memory is enabled; handled
+    // synchronously by FAgentMemoryStore instead of a registry handler.
+    static bool IsMemoryRememberName(const FString& RegistryName);
+    static bool IsMemoryForgetName(const FString& RegistryName);
 };
